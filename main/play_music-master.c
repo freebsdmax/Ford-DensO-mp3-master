@@ -28,6 +28,8 @@
 #include "esp_heap_caps.h"
 #include "i2s_stream.h"
 #include "esp_wifi.h"  // Для Wi-Fi функцій
+#include "esp_netif.h"
+#include "esp_event.h"
 // ДОБАВЬТЕ ЭТОТ INCLUDE ДЛЯ I2S:
 #include "driver/i2s_std.h"  // Для I2S в ESP-IDF v5.x
 #include "driver/i2s_types.h"
@@ -93,11 +95,18 @@ static const char *TAG = "Player";
 #define NVS_KEY_AP_PASS    "ap_pass"      // AP password
 #define NVS_KEY_PLAYER_DATE "player_date" // Версія player - дата
 #define NVS_KEY_PLAYER_TIME "player_time" // Версія player - час
+// NVS key for sniffer enabled flag
+#define NVS_KEY_SNIFFER_ENABLED "sniffer_enabled"
 #define NVS_KEY_UART_DATE   "uart_date"   // Версія UART - дата
 #define NVS_KEY_UART_TIME   "uart_time"   // Версія UART - час
 #define POSITION_SAVE_INTERVAL_MS 60000  // 🕒 Зберігати позицію кожні 60 секунд
 #define MIN_POSITION_CHANGE_MS 10000     // 📏 Мінімальна зміна позиції для збереження
 #define PLAYBACK_STALL_TIMEOUT_MS 8000   // ⏳ 8 сек без прогресу - перезапуск треку
+
+
+// Глобальний прапор для детальних логів (false - приховати зайві логи)
+extern bool g_verbose_logs;
+extern bool g_player_logs;
 
 
 // 🔌 CAN налаштування
@@ -173,6 +182,9 @@ static twai_timing_config_t get_can_timing_config(uint16_t bitrate_kbps)
 
 static void check_i2s_input_signal(void);
 static void stop_external_input(void);
+// Callbacks from WiFi CAN sniffer (defined later)
+static void wifi_can_on_message_callback(const can_sniffer_frame_t *frame);
+static void wifi_can_on_control_callback(uint8_t cmd, const uint8_t *data, uint8_t len);
 
 // External I2S input pins (BCLK, WS, DIN) - change these to match your board
 #ifndef EXT_I2S_BCLK_PIN
@@ -246,6 +258,8 @@ static bool g_skip_to_next = false;
 static bool g_skip_to_prev = false;  // ⏮️ Додано для попереднього треку
 static bool g_play_specific_track = false;  // 🎯 Чи відтворювати конкретний трек з веб
 static bool g_is_paused = false;     // ⏸️ Додано для паузи
+// Збережений стан сніфера (true=enabled)
+static bool g_sniffer_enabled = false;
 static TaskHandle_t g_player_task_handle = NULL;
 static int64_t g_stall_last_ts_ms = 0;    // ⏳ Час останньої перевірки прогресу
 static size_t g_stall_last_bytes = 0;     // 📊 Останній прогрес у байтах
@@ -274,11 +288,11 @@ static void i2s_passthrough_task(void *pvParameters)
 
     // Гібридний підхід: низькорівневий I2S slave для входу + ESP-ADF writer для виходу
     
-    ESP_LOGI(TAG, "🎵 Ініціалізація I2S slave для входу...");
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "🎵 Ініціалізація I2S slave для входу...");
     
     // Включаємо pull-up на GPIO 40 (DIN) для стабільності
     gpio_set_pull_mode(EXT_I2S_DIN_PIN, GPIO_PULLUP_ONLY);
-    ESP_LOGI(TAG, "✅ Pull-up включена на GPIO %d (DIN)", EXT_I2S_DIN_PIN);
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "✅ Pull-up включена на GPIO %d (DIN)", EXT_I2S_DIN_PIN);
     
     // 1. Низькорівневий I2S slave для читання (отримує clock ззовні)
     i2s_chan_config_t rx_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
@@ -324,14 +338,16 @@ static void i2s_passthrough_task(void *pvParameters)
         return;
     }
     
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-    ESP_LOGI(TAG, "✅ RX SLAVE ГОТОВИЙ (I2S_NUM_1)");
-    ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
-    ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    if (g_verbose_logs && g_player_logs) {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+        ESP_LOGI(TAG, "✅ RX SLAVE ГОТОВИЙ (I2S_NUM_1)");
+        ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
+        ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    }
 
     // 2. ESP-ADF I2S stream для виходу (master на PCM5102)
-    ESP_LOGI(TAG, "🎵 Створення ESP-ADF I2S writer для виходу...");
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "🎵 Створення ESP-ADF I2S writer для виходу...");
     
     i2s_stream_cfg_t i2s_writer_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_writer_cfg.type = AUDIO_STREAM_WRITER;
@@ -354,20 +370,24 @@ static void i2s_passthrough_task(void *pvParameters)
 
     // Запускаємо writer
     audio_element_run(i2s_writer);
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-    ESP_LOGI(TAG, "✅ TX MASTER ГОТОВИЙ (I2S_NUM_0)");
-    ESP_LOGI(TAG, "📍 GPIO: BCLK=17, WS=18, DOUT=16");
-    ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
-    ESP_LOGI(TAG, "🎯 Вихід: PCM5102 DAC");
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    if (g_verbose_logs && g_player_logs) {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+        ESP_LOGI(TAG, "✅ TX MASTER ГОТОВИЙ (I2S_NUM_0)");
+        ESP_LOGI(TAG, "📍 GPIO: BCLK=17, WS=18, DOUT=16");
+        ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
+        ESP_LOGI(TAG, "🎯 Вихід: PCM5102 DAC");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    }
 
     // 3. Основний цикл: читаємо з RX slave, пишемо в writer
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  🎵 PASSTHROUGH АКТИВНИЙ                      ║");
-    ESP_LOGI(TAG, "║  RX: I2S1 (slave) → TX: I2S0 (master)        ║");
-    ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
-    ESP_LOGI(TAG, "");
+    if (g_verbose_logs && g_player_logs) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
+        ESP_LOGI(TAG, "║  🎵 PASSTHROUGH АКТИВНИЙ                      ║");
+        ESP_LOGI(TAG, "║  RX: I2S1 (slave) → TX: I2S0 (master)        ║");
+        ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
+    }
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "");
     
     // Менший буфер для меншої затримки, але частіші передачі
     uint8_t *buffer = malloc(2048);
@@ -389,12 +409,14 @@ static void i2s_passthrough_task(void *pvParameters)
         
         if (ret == ESP_OK && bytes_read > 0) {
             if (!first_data) {
-                ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-                ESP_LOGI(TAG, "✅ ПЕРШІ ДАНІ ОТРИМАНО З SLAVE!");
-                ESP_LOGI(TAG, "📊 Розмір блоку: %d байт", bytes_read);
-                ESP_LOGI(TAG, "🎯 I2S порт: I2S_NUM_1 (slave mode)");
-                ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
-                ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+                if (g_verbose_logs) {
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "✅ ПЕРШІ ДАНІ ОТРИМАНО З SLAVE!");
+                    ESP_LOGI(TAG, "📊 Розмір блоку: %d байт", bytes_read);
+                    ESP_LOGI(TAG, "🎯 I2S порт: I2S_NUM_1 (slave mode)");
+                    ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+                }
                 first_data = true;
             }
             total_read += bytes_read;
@@ -429,18 +451,20 @@ static void i2s_passthrough_task(void *pvParameters)
 
     free(buffer);
     
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  🛑 ЗУПИНКА PASSTHROUGH                       ║");
-    ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
+    if (g_verbose_logs) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
+        ESP_LOGI(TAG, "║  🛑 ЗУПИНКА PASSTHROUGH                       ║");
+        ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
+    }
     
     audio_element_stop(i2s_writer);
     audio_element_deinit(i2s_writer);
-    ESP_LOGI(TAG, "✅ I2S writer зупинено");
+    if (g_verbose_logs) ESP_LOGI(TAG, "✅ I2S writer зупинено");
     
     i2s_channel_disable(rx_handle);
     i2s_del_channel(rx_handle);
-    ESP_LOGI(TAG, "✅ I2S slave зупинено");
+    if (g_verbose_logs) ESP_LOGI(TAG, "✅ I2S slave зупинено");
     
     ESP_LOGI(TAG, "═══════════════════════════════════════════════");
     ESP_LOGI(TAG, "✅ PASSTHROUGH ПОВНІСТЮ ЗУПИНЕНО");
@@ -621,6 +645,41 @@ static esp_err_t save_wifi_mode_pref(int mode)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "💾 Збережено wifi_mode=%d (0=AP,1=STA)", mode);
     }
+    return err;
+}
+
+// 💾 Збереження стану Wi-Fi CAN-Sniffer (1=enabled,0=disabled)
+static esp_err_t save_sniffer_enabled(int enabled)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_i32(nvs_handle, NVS_KEY_SNIFFER_ENABLED, enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) ESP_LOGI(TAG, "💾 Збережено sniffer_enabled=%d", enabled ? 1 : 0);
+    return err;
+}
+
+// 📥 Завантаження стану Wi-Fi CAN-Sniffer
+static esp_err_t load_sniffer_enabled(int *enabled)
+{
+    if (!enabled) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) { *enabled = 0; return err; }
+    int32_t val = 0;
+    err = nvs_get_i32(nvs_handle, NVS_KEY_SNIFFER_ENABLED, &val);
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) {
+        *enabled = (val != 0) ? 1 : 0;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *enabled = 0; // default disabled
+        err = ESP_OK;
+    } else {
+        *enabled = 0;
+    }
+    ESP_LOGI(TAG, "📥 Завантажено sniffer_enabled=%d", *enabled);
     return err;
 }
 
@@ -1236,10 +1295,10 @@ esp_err_t get_slave_version_extended(char *main_date, size_t main_date_len, char
             uart_time[uart_time_len - 1] = '\0';
         }
         
-        ESP_LOGI(TAG, "✅ Slave versions received:");
-        ESP_LOGI(TAG, "  🎵 Main: %s %s", resp.main_build_date, resp.main_build_time);
-        ESP_LOGI(TAG, "  📡 CRC: %s %s", resp.crc_build_date, resp.crc_build_time);
-        ESP_LOGI(TAG, "  📡 UART: %s %s", resp.uart_build_date, resp.uart_build_time);
+        //ESP_LOGI(TAG, "✅ Slave versions received:");
+        //ESP_LOGI(TAG, "  🎵 Main: %s %s", resp.main_build_date, resp.main_build_time);
+        //ESP_LOGI(TAG, "  📡 CRC: %s %s", resp.crc_build_date, resp.crc_build_time);
+        //ESP_LOGI(TAG, "  📡 UART: %s %s", resp.uart_build_date, resp.uart_build_time);
         return ESP_OK;
     }
     
@@ -3425,6 +3484,68 @@ void player_control(const char* cmd, int track) {
     } else if (strcmp(cmd, "prev") == 0) {
         g_skip_to_prev = true;
         ESP_LOGI(TAG, "🌐 Веб: попередній трек");
+    } else if (strcmp(cmd, "switch_mode") == 0) {
+        ESP_LOGI(TAG, "🌐 Web: switch_mode requested");
+        // Надсилаємо повідомлення, як і для клавіші 'm'
+        app_message_t msg;
+        msg.id = APP_MODE_SWITCH;
+        xQueueSend(app_queue, &msg, 0);
+    } else if (strcmp(cmd, "toggle_sniffer") == 0) {
+        if (!g_sniffer_enabled) {
+            ESP_LOGI(TAG, "🌐 Web: enabling WiFi CAN Sniffer via web toggle");
+            wifi_can_sniffer_config_t cfg = {
+                .wifi_ssid = WIFI_SSID,
+                .wifi_password = WIFI_PASSWORD,
+                .pc_ip_str = PC_IP_ADDR,
+                .udp_port = UDP_PORT,
+                .on_can_message = wifi_can_on_message_callback,
+                .on_control_command = wifi_can_on_control_callback,
+            };
+            if (wifi_can_sniffer_init(&cfg) == ESP_OK) {
+                g_sniffer_enabled = true;
+                save_sniffer_enabled(1);
+                ESP_LOGI(TAG, "✅ Sniffer enabled (saved)");
+            } else {
+                ESP_LOGE(TAG, "❌ Failed to enable sniffer");
+            }
+        } else {
+            ESP_LOGI(TAG, "🌐 Web: disabling WiFi CAN Sniffer via web toggle");
+            wifi_can_sniffer_deinit();
+            g_sniffer_enabled = false;
+            save_sniffer_enabled(0);
+            ESP_LOGI(TAG, "✅ Sniffer disabled (saved)");
+        }
+    }
+    else if (strcmp(cmd, "set_sniffer") == 0) {
+        // 'track' parameter is used as state: 1 = enable, 0 = disable
+        if (track == 1) {
+            if (!g_sniffer_enabled) {
+                ESP_LOGI(TAG, "🌐 Web: setting WiFi CAN Sniffer = ON");
+                wifi_can_sniffer_config_t cfg = {
+                    .wifi_ssid = WIFI_SSID,
+                    .wifi_password = WIFI_PASSWORD,
+                    .pc_ip_str = PC_IP_ADDR,
+                    .udp_port = UDP_PORT,
+                    .on_can_message = wifi_can_on_message_callback,
+                    .on_control_command = wifi_can_on_control_callback,
+                };
+                if (wifi_can_sniffer_init(&cfg) == ESP_OK) {
+                    g_sniffer_enabled = true;
+                    save_sniffer_enabled(1);
+                    ESP_LOGI(TAG, "✅ Sniffer enabled (saved)");
+                } else {
+                    ESP_LOGE(TAG, "❌ Failed to enable sniffer");
+                }
+            }
+        } else {
+            if (g_sniffer_enabled) {
+                ESP_LOGI(TAG, "🌐 Web: setting WiFi CAN Sniffer = OFF");
+                wifi_can_sniffer_deinit();
+                g_sniffer_enabled = false;
+                save_sniffer_enabled(0);
+                ESP_LOGI(TAG, "✅ Sniffer disabled (saved)");
+            }
+        }
     }
 }
 
@@ -3447,8 +3568,8 @@ char* get_player_status_json(void) {
     int duration_ms = g_current_track_duration_ms;
     if (duration_ms <= 0) duration_ms = 180000; // Запасний варіант
     
-    snprintf(json, 256, "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,\"playlist_size\":%d}",
-             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false", g_playlist_size);
+    snprintf(json, 256, "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s}",
+             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false", g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false");
     
     return json;
 }
@@ -3517,6 +3638,81 @@ void app_main(void)
 {
     // 🌙 ПЕРШ ЗА ВСЕ: перевіряємо пробудження від сну
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    
+    // Рано ініціалізуємо NVS для завантаження налаштувань логів
+    esp_err_t nvs_err = init_nvs();
+    if (nvs_err != ESP_OK) {
+        ESP_LOGE(TAG, "❌ Помилка ініціалізації NVS: %s", esp_err_to_name(nvs_err));
+    } else {
+        // Завантажуємо налаштування логів
+        nvs_handle_t nvs_handle;
+        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Loading component logs from NVS");
+            uint8_t val;
+            if (nvs_get_u8(nvs_handle, "verbose_logs", &val) == ESP_OK) {
+                g_verbose_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded verbose_logs: %d", g_verbose_logs);
+            } else {
+                ESP_LOGI(TAG, "Failed to load verbose_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "player_logs", &val) == ESP_OK) {
+                g_player_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded player_logs: %d", g_player_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load player_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "wifi_logs", &val) == ESP_OK) {
+                g_wifi_can_sniffer_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded wifi_can_sniffer_logs: %d", g_wifi_can_sniffer_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load wifi_can_sniffer_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "web_ota_logs", &val) == ESP_OK) {
+                g_web_ota_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded web_ota_logs: %d", g_web_ota_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load web_ota_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "uart_ota_logs", &val) == ESP_OK) {
+                g_uart_ota_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded uart_ota_logs: %d", g_uart_ota_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load uart_ota_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "elm327_logs", &val) == ESP_OK) {
+                g_elm327_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded elm327_logs: %d", g_elm327_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load elm327_logs from NVS");
+            }
+            nvs_close(nvs_handle);
+        } else {
+            ESP_LOGE(TAG, "Failed to open NVS for loading component logs: %s", esp_err_to_name(err));
+        }
+    }
+    
+    // Встановлюємо рівні логів на основі налаштувань
+    esp_log_level_set("*", ESP_LOG_WARN);               // ⚠️ Інші компоненти - попередження
+    esp_log_level_set("Player", g_player_logs ? ESP_LOG_INFO : ESP_LOG_NONE);          // ℹ️ Наш код - інформаційний рівень (TAG = "Player")
+    esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);  // ✅ Дозволяємо бачити логи Wi-Fi CAN sniffer
+    // Ініціалізація TCP/IP стеку та дефолтного event-loop — робимо один раз тут
+    esp_err_t _neterr = esp_netif_init();
+    if (_neterr != ESP_OK && _neterr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "❌ esp_netif_init failed: %s", esp_err_to_name(_neterr));
+    } else {
+        ESP_LOGI(TAG, "✅ esp_netif_init ok (or already initialized)");
+    }
+    _neterr = esp_event_loop_create_default();
+    if (_neterr != ESP_OK && _neterr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "❌ esp_event_loop_create_default failed: %s", esp_err_to_name(_neterr));
+    } else {
+        ESP_LOGI(TAG, "✅ esp_event_loop_create_default ok (or already created)");
+    }
+    esp_log_level_set("web_ota", ESP_LOG_WARN);         // 🔄 Дозволяємо бачити логи OTA
+    esp_log_level_set("UART_OTA_MASTER", g_uart_ota_logs ? ESP_LOG_INFO : ESP_LOG_NONE); // 📡 Дозволяємо бачити логи UART OTA
+    esp_log_level_set("ELM327_WIFI", g_elm327_logs ? ESP_LOG_INFO : ESP_LOG_NONE);      // 🔧 Дозволяємо бачити логи ELM327
+    
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
         // Пробудження від Deep Sleep по таймеру
         ESP_LOGI(TAG, "🌅 ПРОБУДЖЕННЯ ВІД DEEP SLEEP");
@@ -3529,12 +3725,6 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "🌅 Нормальний запуск системи");
     }
-    
-    esp_log_level_set("*", ESP_LOG_WARN);               // ⚠️ Інші компоненти - попередження
-    esp_log_level_set("Player", ESP_LOG_INFO);          // ℹ️ Наш код - інформаційний рівень (TAG = "Player")
-    esp_log_level_set("WiFiCanSniffer", ESP_LOG_INFO);  // ✅ Дозволяємо бачити логи Wi-Fi CAN sniffer
-    esp_log_level_set("web_ota", ESP_LOG_INFO);         // 🔄 Дозволяємо бачити логи OTA
-    esp_log_level_set("UART_OTA_MASTER", ESP_LOG_INFO); // 📡 Дозволяємо бачити логи UART OTA
     
     ESP_LOGI(TAG, "... ...");
     ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
@@ -3555,13 +3745,8 @@ void app_main(void)
     gpio_reset_pin((gpio_num_t)SLEEP_IND_PIN);          // Сбросить настройки пина
     gpio_set_direction((gpio_num_t)SLEEP_IND_PIN, GPIO_MODE_OUTPUT); // Настроить как выход
     gpio_set_level((gpio_num_t)SLEEP_IND_PIN, 1);       // Установить HIGH
-    // === КРИТЕРІЙ 2: Ініціалізація NVS (перевір що немає інших викликів nvs_flash_init) ===
-    ESP_LOGI(TAG, "🗃️ Ініціалізація NVS для збереження позиції...");
-    esp_err_t nvs_err = init_nvs();
-    if (nvs_err != ESP_OK) {
-        ESP_LOGE(TAG, "❌ Помилка ініціалізації NVS: %s", esp_err_to_name(nvs_err));
-    } else {
-        ESP_LOGI(TAG, "✅ NVS ініціалізовано успішно");
+    // === КРИТЕРІЙ 2: NVS вже ініціалізована вище ===
+    {
         // 💾 Зберігаємо версію player при першому запуску або при зміні
         nvs_handle_t nvs_handle;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
@@ -3766,42 +3951,48 @@ if (g_board_handle) {
         ESP_LOGI(TAG, "✅ Обробник кнопки BOOT (GPIO%d) встановлено", APP_QUIT_PIN);
     }
     
-    // 📡 Ініціалізація Wi-Fi CAN-Sniffer
-    ESP_LOGI(TAG, "📡 Ініціалізація Wi-Fi CAN-Sniffer...");
-    // AP налаштування лишаються як було (WIFI_SSID/WIFI_PASSWORD)
-    wifi_can_sniffer_config_t wifi_can_config = {
-        .wifi_ssid = WIFI_SSID,
-        .wifi_password = WIFI_PASSWORD,
-        .pc_ip_str = PC_IP_ADDR,
-        .udp_port = UDP_PORT,
-        .on_can_message = wifi_can_on_message_callback,
-        .on_control_command = wifi_can_on_control_callback,
-    };
-    
-    esp_err_t wifi_can_err = wifi_can_sniffer_init(&wifi_can_config);
-    if (wifi_can_err == ESP_OK) {
-        ESP_LOGI(TAG, "✅ Wi-Fi CAN-Sniffer ініціалізовано");
-        ESP_LOGI(TAG, "   📡 SSID: %s", WIFI_SSID);
-        ESP_LOGI(TAG, "   🖥️  PC IP: %s", PC_IP_ADDR);
-        ESP_LOGI(TAG, "   📊 UDP Port: 0x%04X", UDP_PORT);
-
-        // Запускаем простой веб-OTA сервер на том же Wi-Fi интерфейсе
-        if (web_ota_start() == ESP_OK) {
-            ESP_LOGI(TAG, "🌐 Web OTA доступен: http://192.168.4.1/");
+    // 📡 Wi‑Fi CAN-Sniffer: load saved enabled flag from NVS
+    int saved = 0;
+    load_sniffer_enabled(&saved);
+    if (saved) {
+        ESP_LOGI(TAG, "📡 Wi-Fi CAN-Sniffer saved state = ENABLED — starting at boot");
+        wifi_can_sniffer_config_t wifi_can_config = {
+            .wifi_ssid = WIFI_SSID,
+            .wifi_password = WIFI_PASSWORD,
+            .pc_ip_str = PC_IP_ADDR,
+            .udp_port = UDP_PORT,
+            .on_can_message = wifi_can_on_message_callback,
+            .on_control_command = wifi_can_on_control_callback,
+        };
+        esp_err_t wifi_can_err = wifi_can_sniffer_init(&wifi_can_config);
+        if (wifi_can_err == ESP_OK) {
+            g_sniffer_enabled = true;
+            ESP_LOGI(TAG, "✅ Wi-Fi CAN-Sniffer initialized at boot");
         } else {
-            ESP_LOGW(TAG, "⚠️ Web OTA не запустился");
+            ESP_LOGW(TAG, "⚠️ Failed to init sniffer at boot: %s", esp_err_to_name(wifi_can_err));
         }
-        // Спробувати Wi-Fi підключення з fallback
-        try_wifi_connection_with_fallback();
     } else {
-        ESP_LOGW(TAG, "⚠️ Wi-Fi CAN-Sniffer ініціалізація не вдалась: %s", esp_err_to_name(wifi_can_err));
+        ESP_LOGI(TAG, "📡 Wi-Fi CAN-Sniffer is DISABLED by default. Use web UI to enable.");
     }
+
+    // Запускаємо веб-OTA незалежно від стану сніфера
+    if (web_ota_start() == ESP_OK) {
+        ESP_LOGI(TAG, "🌐 Web OTA доступен: http://192.168.4.1/");
+    } else {
+        ESP_LOGW(TAG, "⚠️ Web OTA не запустился");
+    }
+
+    // Спробувати Wi-Fi підключення з fallback (AP/STA) — робимо це завжди
+    try_wifi_connection_with_fallback();
+
+    // Встановити рівень логів для WiFiCanSniffer (буде використаний, коли сніфер запуститься)
+    esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
     
     ESP_LOGI(TAG, "🎧 Очікування підключення USB флеш-накопичувача...");
     ESP_LOGI(TAG, "✅ Для перемикання треків натисніть кнопку BOOT");
     
     // Запускаємо задачу обробки команд з терміналу
-    if (xTaskCreatePinnedToCore(terminal_commands_task, "terminal_cmd", 2048, NULL, 3, NULL, 0) == pdPASS) {
+    if (xTaskCreatePinnedToCore(terminal_commands_task, "terminal_cmd", 4096, NULL, 3, NULL, 0) == pdPASS) {
         ESP_LOGI(TAG, "⌨️ Terminal commands task started (n=next, p=prev, m=mode)");
     } else {
         ESP_LOGW(TAG, "⚠️ Failed to create terminal commands task");
@@ -4291,10 +4482,12 @@ if (g_board_handle) {
  */
 static void terminal_commands_task(void *arg)
 {
-    ESP_LOGI(TAG, "⌨️ Terminal commands task started");
-    ESP_LOGI(TAG, "   n - next track");
-    ESP_LOGI(TAG, "   p - previous track");
-    ESP_LOGI(TAG, "   m - mode switch");
+    if (g_verbose_logs) {
+        ESP_LOGI(TAG, "⌨️ Terminal commands task started");
+        ESP_LOGI(TAG, "   n - next track");
+        ESP_LOGI(TAG, "   p - previous track");
+        ESP_LOGI(TAG, "   m - mode switch");
+    }
     
     char ch;
     app_message_t msg;
@@ -4320,7 +4513,7 @@ static void terminal_commands_task(void *arg)
         }
         else if (ch == 's' || ch == 'S') {
             // Одноразове натискання 's' — відправляємо подію перемикання Wi-Fi у STA (DHCP)
-            ESP_LOGI(TAG, "🌐 Натискання 's' — запит на перемикання Wi-Fi у STA (DHCP)");
+            if (g_verbose_logs) ESP_LOGI(TAG, "🌐 Натискання 's' — запит на перемикання Wi-Fi у STA (DHCP)");
             msg.id = APP_WIFI_SWITCH_STA;
             xQueueSend(app_queue, &msg, 0);
         }
