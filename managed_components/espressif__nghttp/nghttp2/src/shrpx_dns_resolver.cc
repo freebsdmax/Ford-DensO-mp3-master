@@ -137,13 +137,13 @@ DNSResolver::~DNSResolver() {
   ev_timer_stop(loop_, &timer_);
 }
 
-int DNSResolver::resolve(const StringRef &name, int family) {
+int DNSResolver::resolve(std::string_view name, int family) {
   if (status_ != DNSResolverStatus::IDLE) {
     return -1;
   }
 
-  if (LOG_ENABLED(INFO)) {
-    LOG(INFO) << "Start resolving host " << name << " in IPv"
+  if (log_enabled(INFO)) {
+    Log{INFO} << "Start resolving host " << name << " in IPv"
               << (family == AF_INET ? "4" : "6");
   }
 
@@ -154,19 +154,20 @@ int DNSResolver::resolve(const StringRef &name, int family) {
 
   auto &dnsconf = get_config()->dns;
 
-  ares_options opts{};
-  opts.sock_state_cb = sock_state_cb;
-  opts.sock_state_cb_data = this;
-  opts.timeout = static_cast<int>(dnsconf.timeout.lookup * 1000);
-  opts.tries = dnsconf.max_try;
+  ares_options opts{
+    .timeout = static_cast<int>(dnsconf.timeout.lookup * 1000),
+    .tries = static_cast<int>(dnsconf.max_try),
+    .sock_state_cb = sock_state_cb,
+    .sock_state_cb_data = this,
+  };
 
   auto optmask = ARES_OPT_SOCK_STATE_CB | ARES_OPT_TIMEOUTMS | ARES_OPT_TRIES;
 
   ares_channel chan;
   rv = ares_init_options(&chan, &opts, optmask);
   if (rv != ARES_SUCCESS) {
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "ares_init_options failed: " << ares_strerror(rv);
+    if (log_enabled(INFO)) {
+      Log{INFO} << "ares_init_options failed: " << ares_strerror(rv);
     }
     status_ = DNSResolverStatus::ERROR;
     return -1;
@@ -175,8 +176,9 @@ int DNSResolver::resolve(const StringRef &name, int family) {
   channel_ = chan;
   status_ = DNSResolverStatus::RUNNING;
 
-  ares_addrinfo_hints hints{};
-  hints.ai_family = family_;
+  ares_addrinfo_hints hints{
+    .ai_family = family_,
+  };
 
   ares_getaddrinfo(channel_, name_.data(), nullptr, &hints, addrinfo_cb, this);
   reset_timeout();
@@ -225,7 +227,8 @@ void DNSResolver::reset_timeout() {
   }
   // To avoid that timer_.repeat becomes 0, which makes ev_timer_again
   // useless, add tiny fraction of time.
-  timer_.repeat = tv->tv_sec + tv->tv_usec / 1000000. + 1e-9;
+  timer_.repeat = static_cast<double>(tv->tv_sec) +
+                  static_cast<double>(tv->tv_usec) / 1000000. + 1e-9;
   ev_timer_again(loop_, &timer_);
 }
 
@@ -235,7 +238,7 @@ DNSResolverStatus DNSResolver::get_status(Address *result) const {
   }
 
   if (result) {
-    memcpy(result, &result_, sizeof(result_));
+    *result = result_;
   }
 
   return status_;
@@ -296,8 +299,8 @@ void DNSResolver::on_result(int status, ares_addrinfo *ai) {
   ev_timer_stop(loop_, &timer_);
 
   if (status != ARES_SUCCESS) {
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "Name lookup for " << name_
+    if (log_enabled(INFO)) {
+      Log{INFO} << "Name lookup for " << name_
                 << " failed: " << ares_strerror(status);
     }
     status_ = DNSResolverStatus::ERROR;
@@ -308,24 +311,32 @@ void DNSResolver::on_result(int status, ares_addrinfo *ai) {
 
   for (; ap; ap = ap->ai_next) {
     switch (ap->ai_family) {
-    case AF_INET:
+    case AF_INET: {
       status_ = DNSResolverStatus::OK;
-      result_.len = sizeof(result_.su.in);
 
-      assert(sizeof(result_.su.in) == ap->ai_addrlen);
+      sockaddr_in sa;
 
-      memcpy(&result_.su.in, ap->ai_addr, sizeof(result_.su.in));
+      assert(sizeof(sa) == ap->ai_addrlen);
+
+      memcpy(&sa, ap->ai_addr, sizeof(sa));
+
+      result_.skaddr.emplace<sockaddr_in>(sa);
 
       break;
-    case AF_INET6:
+    }
+    case AF_INET6: {
       status_ = DNSResolverStatus::OK;
-      result_.len = sizeof(result_.su.in6);
 
-      assert(sizeof(result_.su.in6) == ap->ai_addrlen);
+      sockaddr_in6 sa;
 
-      memcpy(&result_.su.in6, ap->ai_addr, sizeof(result_.su.in6));
+      assert(sizeof(sa) == ap->ai_addrlen);
+
+      memcpy(&sa, ap->ai_addr, sizeof(sa));
+
+      result_.skaddr.emplace<sockaddr_in6>(sa);
 
       break;
+    }
     default:
       continue;
     }
@@ -334,8 +345,8 @@ void DNSResolver::on_result(int status, ares_addrinfo *ai) {
   }
 
   if (!ap) {
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "Name lookup for " << name_
+    if (log_enabled(INFO)) {
+      Log{INFO} << "Name lookup for " << name_
                 << " failed: no address returned";
     }
     status_ = DNSResolverStatus::ERROR;
@@ -343,9 +354,9 @@ void DNSResolver::on_result(int status, ares_addrinfo *ai) {
   }
 
   if (status_ == DNSResolverStatus::OK) {
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "Name lookup succeeded: " << name_ << " -> "
-                << util::numeric_name(&result_.su.sa, result_.len);
+    if (log_enabled(INFO)) {
+      Log{INFO} << "Name lookup succeeded: " << name_ << " -> "
+                << util::numeric_name(result_.as_sockaddr(), result_.size());
     }
     return;
   }

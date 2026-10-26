@@ -91,6 +91,7 @@ typedef struct {
     int payload_len;                        /*!< Total payload length, payloads exceeding buffer will be posted through multiple events */
     int payload_offset;                     /*!< Actual offset for the data associated with this event */
     esp_websocket_error_codes_t error_handle; /*!< esp-websocket error handle including esp-tls errors as well as internal websocket errors */
+    int close_status_code;                  /*!< RFC 6455 close status code received from the server (0 if none or client-initiated) */
 } esp_websocket_event_data_t;
 
 /**
@@ -112,9 +113,21 @@ typedef struct {
     const char                  *username;                  /*!< Using for Http authentication, only support basic auth now */
     const char                  *password;                  /*!< Using for Http authentication */
     const char                  *path;                      /*!< HTTP Path, if not set, default is `/` */
-    bool                        disable_auto_reconnect;     /*!< Disable the automatic reconnect function when disconnected */
-    bool                        enable_close_reconnect;     /*!< Enable reconnect after server close */
+    bool                        disable_auto_reconnect;     /*!< Disable automatic reconnect on unexpected disconnection (transport errors, poll failures).
+                                                                 Default: false (auto-reconnect is enabled). Reconnect delay is controlled by `reconnect_timeout_ms`.
+                                                                 Note: this flag does not affect behaviour after a clean WebSocket CLOSE handshake;
+                                                                 use `enable_close_reconnect` for that. */
+    bool                        enable_close_reconnect;     /*!< Reconnect after a clean WebSocket CLOSE handshake (RFC 6455 close frame exchange),
+                                                                 whether the close was initiated by the server or by calling esp_websocket_client_close().
+                                                                 Default: false (client stops after a clean close).
+                                                                 When true, esp_websocket_client_close() returns immediately (non-blocking) after sending
+                                                                 the CLOSE frame; the task handles the handshake and reconnects autonomously.
+                                                                 Requires `disable_auto_reconnect` to be false; setting this flag while
+                                                                 `disable_auto_reconnect` is true has no effect on error-triggered disconnections and
+                                                                 may result in a single reconnect attempt that stops on any subsequent error. */
     void                        *user_context;              /*!< HTTP user data context */
+    bool                        task_core_id_set;           /*!< Set to true to use task_core_id. If false, the websocket task uses tskNO_AFFINITY(default) */
+    int                         task_core_id;               /*!< Core ID for the websocket task when task_core_id_set is true. Must be explicitly set by the user, otherwise a zero-initialized config, will pin the task to core 0. Use tskNO_AFFINITY for no pinning. */
     int                         task_prio;                  /*!< Websocket task priority */
     const char                 *task_name;                  /*!< Websocket task name */
     int                         task_stack;                 /*!< Websocket task stack */
@@ -236,6 +249,7 @@ esp_err_t esp_websocket_client_stop(esp_websocket_client_handle_t client);
  *
  *  Notes:
  *  - Cannot be called from the websocket event handler
+ *  - This function cannot be called if `esp_websocket_client_destroy_on_exit` was used for the same handle.
  *
  * @param[in]  client  The client
  *
@@ -248,6 +262,7 @@ esp_err_t esp_websocket_client_destroy(esp_websocket_client_handle_t client);
  *
  *  Notes:
  *  - After event loop finished, client handle would be dangling and should never be used
+ *  - This function is mutually exclusive with `esp_websocket_client_destroy`. Do not call `esp_websocket_client_destroy` manually if this API is used.
  *
  * @param[in]  client      The client
  *
@@ -437,7 +452,7 @@ size_t esp_websocket_client_get_ping_interval_sec(esp_websocket_client_handle_t 
 esp_err_t esp_websocket_client_set_ping_interval_sec(esp_websocket_client_handle_t client, size_t ping_interval_sec);
 
 /**
- * @brief      Get the next reconnect timeout for client. Returns -1 when client is not initialized or automatic reconnect is disabled.
+ * @brief      Get the reconnect timeout for client. Returns -1 when client is not initialized or automatic reconnect is disabled.
  *
  * @param[in]  client             The client
  *
@@ -446,11 +461,11 @@ esp_err_t esp_websocket_client_set_ping_interval_sec(esp_websocket_client_handle
 int esp_websocket_client_get_reconnect_timeout(esp_websocket_client_handle_t client);
 
 /**
- * @brief      Set next reconnect timeout for client.
+ * @brief      Set new reconnect timeout for client.
  *
  *  Notes:
- *  - Changing this value when reconnection delay is already active does not immediately affect the active delay and may have unexpected result.
  *  - Good place to change this value is when handling WEBSOCKET_EVENT_DISCONNECTED or WEBSOCKET_EVENT_ERROR events.
+ *  - This also updates already active reconnection delay, if any.
  *
  * @param[in]  client             The client
  * @param[in]  reconnect_timeout_ms  The new timeout

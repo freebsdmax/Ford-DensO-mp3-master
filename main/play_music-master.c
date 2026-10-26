@@ -26,8 +26,13 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
+#include "esp_app_desc.h"
+#include "cJSON.h"
 #include "i2s_stream.h"
 #include "esp_wifi.h"  // Для Wi-Fi функцій
+#include "esp_netif.h"
+#include "esp_event.h"
 // ДОБАВЬТЕ ЭТОТ INCLUDE ДЛЯ I2S:
 #include "driver/i2s_std.h"  // Для I2S в ESP-IDF v5.x
 #include "driver/i2s_types.h"
@@ -66,6 +71,7 @@
 #include "aac_decoder.h"
 #endif
 #include "driver/twai.h"
+#include "esp_attr.h"
 #include "esp_sleep.h"
 #include "driver/uart.h"
 #include "filter_resample.h"  // Для динамічної підстройки частоти
@@ -73,14 +79,14 @@
 #include "web_ota.h"
 #include "uart_ota_protocol.h"  // UART OTA протокол
 #include "player_version.h"     // Версія основного додатку
-
+#include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 
 static const char *TAG = "Player";
 
 #define MNT_PATH         "/ROOT"
 #define APP_QUIT_PIN     GPIO_NUM_0
-#define BUFFER_SIZE      4096
+#define BUFFER_SIZE      8192
 #define MAX_MSC_DEVICES  CONFIG_FATFS_VOLUME_COUNT
 #define MAX_PLAYLIST_SIZE 1000
 #define NVS_NAMESPACE    "audio_player"
@@ -93,11 +99,18 @@ static const char *TAG = "Player";
 #define NVS_KEY_AP_PASS    "ap_pass"      // AP password
 #define NVS_KEY_PLAYER_DATE "player_date" // Версія player - дата
 #define NVS_KEY_PLAYER_TIME "player_time" // Версія player - час
+// NVS key for sniffer enabled flag
+#define NVS_KEY_SNIFFER_ENABLED "sniffer_enabled"
 #define NVS_KEY_UART_DATE   "uart_date"   // Версія UART - дата
 #define NVS_KEY_UART_TIME   "uart_time"   // Версія UART - час
 #define POSITION_SAVE_INTERVAL_MS 60000  // 🕒 Зберігати позицію кожні 60 секунд
 #define MIN_POSITION_CHANGE_MS 10000     // 📏 Мінімальна зміна позиції для збереження
 #define PLAYBACK_STALL_TIMEOUT_MS 8000   // ⏳ 8 сек без прогресу - перезапуск треку
+
+
+// Глобальний прапор для детальних логів (false - приховати зайві логи)
+extern bool g_verbose_logs;
+extern bool g_player_logs;
 
 
 // 🔌 CAN налаштування
@@ -173,6 +186,10 @@ static twai_timing_config_t get_can_timing_config(uint16_t bitrate_kbps)
 
 static void check_i2s_input_signal(void);
 static void stop_external_input(void);
+void player_control(const char *cmd, int track);
+// Callbacks from WiFi CAN sniffer (defined later)
+static void wifi_can_on_message_callback(const can_sniffer_frame_t *frame);
+static void wifi_can_on_control_callback(uint8_t cmd, const uint8_t *data, uint8_t len);
 
 // External I2S input pins (BCLK, WS, DIN) - change these to match your board
 #ifndef EXT_I2S_BCLK_PIN
@@ -234,6 +251,10 @@ static sleep_settings_t g_sleep_settings = {
 // 🌙 Last system activity time (for idle detection)
 static uint32_t g_last_system_activity_time = 0;
 
+// 🕒 Debounce для CAN команд (антидрібниця)
+static uint32_t g_last_next_command_time = 0;
+static uint32_t g_last_prev_command_time = 0;
+#define CAN_COMMAND_DEBOUNCE_MS 500  // 500 мс між командами
 
 
 // 📋 Глобальні змінні для плейлиста
@@ -246,6 +267,8 @@ static bool g_skip_to_next = false;
 static bool g_skip_to_prev = false;  // ⏮️ Додано для попереднього треку
 static bool g_play_specific_track = false;  // 🎯 Чи відтворювати конкретний трек з веб
 static bool g_is_paused = false;     // ⏸️ Додано для паузи
+// Збережений стан сніфера (true=enabled)
+static bool g_sniffer_enabled = false;
 static TaskHandle_t g_player_task_handle = NULL;
 static int64_t g_stall_last_ts_ms = 0;    // ⏳ Час останньої перевірки прогресу
 static size_t g_stall_last_bytes = 0;     // 📊 Останній прогрес у байтах
@@ -255,6 +278,8 @@ static int32_t g_current_track_duration_ms = 180000; // Тривалість п�
 // 📡 Wi-Fi CAN-Sniffer статистика
 static uint16_t g_can_frames_per_second = 0;
 static uint16_t g_can_bytes_per_second = 0;
+static uint64_t g_can_total_frames = 0;
+static uint64_t g_can_total_bytes = 0;
 static uint32_t g_last_stat_time = 0;
 
 // 🔌 Глобальні змінні для USB управління
@@ -266,6 +291,22 @@ static volatile bool g_mode_external = false; // true = воспроизводи
 static int g_last_source_pref = 0; // 0 = USB(default), 1 = external
 static audio_element_handle_t g_external_writer = NULL;
 static TaskHandle_t g_i2s_passthrough_task_handle = NULL;
+static volatile bool g_external_i2s_flush_requested = false;
+static volatile uint32_t g_external_i2s_rx_overflows = 0;
+static volatile uint32_t g_external_i2s_rx_overflow_bytes = 0;
+
+static bool IRAM_ATTR external_i2s_rx_overflow_callback(i2s_chan_handle_t handle,
+                                                        i2s_event_data_t *event,
+                                                        void *user_ctx)
+{
+    (void)handle;
+    (void)user_ctx;
+    g_external_i2s_rx_overflows++;
+    if (event) {
+        g_external_i2s_rx_overflow_bytes += event->size;
+    }
+    return false;
+}
 
 // This task reads from the next available I2S port (slave) and writes directly to the g_external_writer element (I2S0 master)
 static void i2s_passthrough_task(void *pvParameters)
@@ -274,11 +315,11 @@ static void i2s_passthrough_task(void *pvParameters)
 
     // Гібридний підхід: низькорівневий I2S slave для входу + ESP-ADF writer для виходу
     
-    ESP_LOGI(TAG, "🎵 Ініціалізація I2S slave для входу...");
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "🎵 Ініціалізація I2S slave для входу...");
     
     // Включаємо pull-up на GPIO 40 (DIN) для стабільності
     gpio_set_pull_mode(EXT_I2S_DIN_PIN, GPIO_PULLUP_ONLY);
-    ESP_LOGI(TAG, "✅ Pull-up включена на GPIO %d (DIN)", EXT_I2S_DIN_PIN);
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "✅ Pull-up включена на GPIO %d (DIN)", EXT_I2S_DIN_PIN);
     
     // 1. Низькорівневий I2S slave для читання (отримує clock ззовні)
     i2s_chan_config_t rx_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
@@ -314,6 +355,18 @@ static void i2s_passthrough_task(void *pvParameters)
         vTaskDelete(NULL);
         return;
     }
+
+    const i2s_event_callbacks_t rx_callbacks = {
+        .on_recv_q_ovf = external_i2s_rx_overflow_callback,
+    };
+    ret = i2s_channel_register_event_callback(rx_handle, &rx_callbacks, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "❌ RX callback registration: %s", esp_err_to_name(ret));
+        i2s_del_channel(rx_handle);
+        g_i2s_passthrough_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
     
     ret = i2s_channel_enable(rx_handle);
     if (ret != ESP_OK) {
@@ -324,14 +377,16 @@ static void i2s_passthrough_task(void *pvParameters)
         return;
     }
     
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-    ESP_LOGI(TAG, "✅ RX SLAVE ГОТОВИЙ (I2S_NUM_1)");
-    ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
-    ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    if (g_verbose_logs && g_player_logs) {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+        ESP_LOGI(TAG, "✅ RX SLAVE ГОТОВИЙ (I2S_NUM_1)");
+        ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
+        ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    }
 
     // 2. ESP-ADF I2S stream для виходу (master на PCM5102)
-    ESP_LOGI(TAG, "🎵 Створення ESP-ADF I2S writer для виходу...");
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "🎵 Створення ESP-ADF I2S writer для виходу...");
     
     i2s_stream_cfg_t i2s_writer_cfg = I2S_STREAM_CFG_DEFAULT();
     i2s_writer_cfg.type = AUDIO_STREAM_WRITER;
@@ -354,20 +409,24 @@ static void i2s_passthrough_task(void *pvParameters)
 
     // Запускаємо writer
     audio_element_run(i2s_writer);
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-    ESP_LOGI(TAG, "✅ TX MASTER ГОТОВИЙ (I2S_NUM_0)");
-    ESP_LOGI(TAG, "📍 GPIO: BCLK=17, WS=18, DOUT=16");
-    ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
-    ESP_LOGI(TAG, "🎯 Вихід: PCM5102 DAC");
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    if (g_verbose_logs && g_player_logs) {
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+        ESP_LOGI(TAG, "✅ TX MASTER ГОТОВИЙ (I2S_NUM_0)");
+        ESP_LOGI(TAG, "📍 GPIO: BCLK=17, WS=18, DOUT=16");
+        ESP_LOGI(TAG, "🔊 Формат: 44.1kHz, 16bit, Stereo");
+        ESP_LOGI(TAG, "🎯 Вихід: PCM5102 DAC");
+        ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    }
 
     // 3. Основний цикл: читаємо з RX slave, пишемо в writer
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  🎵 PASSTHROUGH АКТИВНИЙ                      ║");
-    ESP_LOGI(TAG, "║  RX: I2S1 (slave) → TX: I2S0 (master)        ║");
-    ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
-    ESP_LOGI(TAG, "");
+    if (g_verbose_logs && g_player_logs) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
+        ESP_LOGI(TAG, "║  🎵 PASSTHROUGH АКТИВНИЙ                      ║");
+        ESP_LOGI(TAG, "║  RX: I2S1 (slave) → TX: I2S0 (master)        ║");
+        ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
+    }
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG, "");
     
     // Менший буфер для меншої затримки, але частіші передачі
     uint8_t *buffer = malloc(2048);
@@ -382,19 +441,43 @@ static void i2s_passthrough_task(void *pvParameters)
 
     size_t bytes_read;
     uint32_t total_read = 0, total_write = 0;
+    uint32_t read_timeouts = 0, read_errors = 0;
+    uint32_t short_writes = 0, write_errors = 0, dropped_bytes = 0;
+    g_external_i2s_rx_overflows = 0;
+    g_external_i2s_rx_overflow_bytes = 0;
+    int64_t last_diag_us = esp_timer_get_time();
     bool first_data = false;
 
     while (g_mode_external) {
+        if (g_external_i2s_flush_requested) {
+            g_external_i2s_flush_requested = false;
+            size_t flushed_bytes = 0;
+            size_t discarded_bytes = 0;
+
+            for (uint32_t i = 0; i < rx_cfg.dma_desc_num; i++) {
+                discarded_bytes = 0;
+                if (i2s_channel_read(rx_handle, buffer, 2048, &discarded_bytes, 0) != ESP_OK ||
+                    discarded_bytes == 0) {
+                    break;
+                }
+                flushed_bytes += discarded_bytes;
+            }
+
+            printf("I2S RX buffer cleared: %u bytes discarded\r\n", (unsigned)flushed_bytes);
+        }
+
         ret = i2s_channel_read(rx_handle, buffer, 2048, &bytes_read, pdMS_TO_TICKS(100));
         
         if (ret == ESP_OK && bytes_read > 0) {
             if (!first_data) {
-                ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-                ESP_LOGI(TAG, "✅ ПЕРШІ ДАНІ ОТРИМАНО З SLAVE!");
-                ESP_LOGI(TAG, "📊 Розмір блоку: %d байт", bytes_read);
-                ESP_LOGI(TAG, "🎯 I2S порт: I2S_NUM_1 (slave mode)");
-                ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
-                ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+                if (g_verbose_logs) {
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+                    ESP_LOGI(TAG, "✅ ПЕРШІ ДАНІ ОТРИМАНО З SLAVE!");
+                    ESP_LOGI(TAG, "📊 Розмір блоку: %d байт", bytes_read);
+                    ESP_LOGI(TAG, "🎯 I2S порт: I2S_NUM_1 (slave mode)");
+                    ESP_LOGI(TAG, "📍 GPIO: BCLK=%d, WS=%d, DIN=%d", EXT_I2S_BCLK_PIN, EXT_I2S_WS_PIN, EXT_I2S_DIN_PIN);
+                    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+                }
                 first_data = true;
             }
             total_read += bytes_read;
@@ -402,45 +485,57 @@ static void i2s_passthrough_task(void *pvParameters)
             int written = audio_element_output(i2s_writer, (char*)buffer, bytes_read);
             if (written > 0) {
                 total_write += written;
+                if ((size_t)written < bytes_read) {
+                    short_writes++;
+                    dropped_bytes += bytes_read - written;
+                }
+            } else {
+                write_errors++;
+                dropped_bytes += bytes_read;
             }
+        } else if (ret == ESP_ERR_TIMEOUT) {
+            read_timeouts++;
+        } else if (ret != ESP_OK) {
+            read_errors++;
         }
 
-        // Статистика (відключено для продуктивності)
-        /*
-        if ((xTaskGetTickCount() - log_time) > pdMS_TO_TICKS(3000)) {
-            ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-            ESP_LOGI(TAG, "🎵 PASSTHROUGH СТАТУС (I2S1→I2S0)");
-            ESP_LOGI(TAG, "───────────────────────────────────────────────");
-            ESP_LOGI(TAG, "📥 Прочитано:  %u байт", total_read);
-            ESP_LOGI(TAG, "📤 Відправлено: %u байт", total_write);
-            ESP_LOGI(TAG, "⚡ Швидкість:  %.2f кБ/с", (float)total_read / 3.0 / 1024.0);
-            if (total_read != total_write) {
-                ESP_LOGW(TAG, "⚠️ РОЗБІЖНІСТЬ: read≠write (%d байт)", (int)(total_read - total_write));
-            } else {
-                ESP_LOGI(TAG, "✅ Синхронізація: OK");
-            }
-            ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-            total_read = 0;
-            total_write = 0;
-            log_time = xTaskGetTickCount();
+        int64_t now_us = esp_timer_get_time();
+        if ((now_us - last_diag_us) >= 5000000 &&
+            (read_timeouts || read_errors || short_writes || write_errors ||
+             g_external_i2s_rx_overflows || g_external_i2s_rx_overflow_bytes) &&
+            g_verbose_logs && g_player_logs) {
+            ESP_LOGW(TAG, "I2S passthrough RX timeout=%u errors=%u DMA_OVF=%u (%u bytes), TX short=%u errors=%u dropped=%u bytes",
+                     read_timeouts, read_errors, g_external_i2s_rx_overflows,
+                     g_external_i2s_rx_overflow_bytes, short_writes, write_errors, dropped_bytes);
+            read_timeouts = 0;
+            read_errors = 0;
+            short_writes = 0;
+            write_errors = 0;
+            dropped_bytes = 0;
+            g_external_i2s_rx_overflows = 0;
+            g_external_i2s_rx_overflow_bytes = 0;
+            last_diag_us = now_us;
+        } else if ((now_us - last_diag_us) >= 5000000) {
+            last_diag_us = now_us;
         }
-        */
     }
 
     free(buffer);
     
-    ESP_LOGI(TAG, "");
-    ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
-    ESP_LOGI(TAG, "║  🛑 ЗУПИНКА PASSTHROUGH                       ║");
-    ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
+    if (g_verbose_logs) {
+        ESP_LOGI(TAG, "");
+        ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
+        ESP_LOGI(TAG, "║  🛑 ЗУПИНКА PASSTHROUGH                       ║");
+        ESP_LOGI(TAG, "╚═══════════════════════════════════════════════╝");
+    }
     
     audio_element_stop(i2s_writer);
     audio_element_deinit(i2s_writer);
-    ESP_LOGI(TAG, "✅ I2S writer зупинено");
+    if (g_verbose_logs) ESP_LOGI(TAG, "✅ I2S writer зупинено");
     
     i2s_channel_disable(rx_handle);
     i2s_del_channel(rx_handle);
-    ESP_LOGI(TAG, "✅ I2S slave зупинено");
+    if (g_verbose_logs) ESP_LOGI(TAG, "✅ I2S slave зупинено");
     
     ESP_LOGI(TAG, "═══════════════════════════════════════════════");
     ESP_LOGI(TAG, "✅ PASSTHROUGH ПОВНІСТЮ ЗУПИНЕНО");
@@ -489,11 +584,15 @@ typedef struct {
         APP_PREV_TRACK,          // ⏮️ Попередній трек
         APP_SAVE_POSITION,       // 💾 Зберегти позицію
         APP_WIFI_SWITCH_STA,     // 🌐 Перемкнути Wi-Fi у STA (DHCP)
-        APP_WIFI_SWITCH_AP       // 🌐 Перемкнути Wi-Fi у AP
+        APP_WIFI_SWITCH_AP,      // 🌐 Перемкнути Wi-Fi у AP
+        APP_TOGGLE_PAUSE,        // ⏸️ Toggle pause/play
+        APP_PLAY_TRACK,          // ▶️ Play specific track
+        APP_SEEK_POSITION        // ⏩ Seek to position
     } id;
     union {
         uint8_t new_dev_address;
         msc_host_device_handle_t device_handle;
+        int int_param;           // For track index or position
     } data;
 } app_message_t;
 
@@ -621,6 +720,41 @@ static esp_err_t save_wifi_mode_pref(int mode)
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "💾 Збережено wifi_mode=%d (0=AP,1=STA)", mode);
     }
+    return err;
+}
+
+// 💾 Збереження стану Wi-Fi CAN-Sniffer (1=enabled,0=disabled)
+static esp_err_t save_sniffer_enabled(int enabled)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_i32(nvs_handle, NVS_KEY_SNIFFER_ENABLED, enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) ESP_LOGI(TAG, "💾 Збережено sniffer_enabled=%d", enabled ? 1 : 0);
+    return err;
+}
+
+// 📥 Завантаження стану Wi-Fi CAN-Sniffer
+static esp_err_t load_sniffer_enabled(int *enabled)
+{
+    if (!enabled) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) { *enabled = 0; return err; }
+    int32_t val = 0;
+    err = nvs_get_i32(nvs_handle, NVS_KEY_SNIFFER_ENABLED, &val);
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) {
+        *enabled = (val != 0) ? 1 : 0;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *enabled = 0; // default disabled
+        err = ESP_OK;
+    } else {
+        *enabled = 0;
+    }
+    ESP_LOGI(TAG, "📥 Завантажено sniffer_enabled=%d", *enabled);
     return err;
 }
 
@@ -1236,10 +1370,10 @@ esp_err_t get_slave_version_extended(char *main_date, size_t main_date_len, char
             uart_time[uart_time_len - 1] = '\0';
         }
         
-        ESP_LOGI(TAG, "✅ Slave versions received:");
-        ESP_LOGI(TAG, "  🎵 Main: %s %s", resp.main_build_date, resp.main_build_time);
-        ESP_LOGI(TAG, "  📡 CRC: %s %s", resp.crc_build_date, resp.crc_build_time);
-        ESP_LOGI(TAG, "  📡 UART: %s %s", resp.uart_build_date, resp.uart_build_time);
+        //ESP_LOGI(TAG, "✅ Slave versions received:");
+        //ESP_LOGI(TAG, "  🎵 Main: %s %s", resp.main_build_date, resp.main_build_time);
+        //ESP_LOGI(TAG, "  📡 CRC: %s %s", resp.crc_build_date, resp.crc_build_time);
+        //ESP_LOGI(TAG, "  📡 UART: %s %s", resp.uart_build_date, resp.uart_build_time);
         return ESP_OK;
     }
     
@@ -1283,45 +1417,89 @@ static void process_can_message(twai_message_t *message)
     // 🔍 Перевіряємо основний ID і перший байт даних
     if (message->identifier == CAN_ID_MAIN && 
         message->data_length_code >= 2 && 
-        message->data[0] == 0x01) {
+        (message->data[0] & 0xF0) == 0x00) {  // data[0] в диапазоне 0x0x (0x00-0x0F)
         
         uint8_t cmd = message->data[1];
         uint8_t cmd_masked = cmd & 0xF0;  // Маскуємо молодші біти (останній символ)
         
         switch (cmd_masked) {
             case 0x40:  // NEXT_TRACK (0x4x, де x може бути будь-чим)
-                ESP_LOGI(TAG, "⏭️ CAN: Команда НАСТУПНИЙ ТРЕК (0x%02X)", cmd);
-                
-                // Если в режиме external input - отправляем по UART на внешнее устройство
-                if (g_mode_external) {
-                    ESP_LOGI(TAG, "🔀 Режим external - отправка по UART");
-                    if (send_i2c_command(LINK_CMD_NEXT_TRACK) != ESP_OK) {
-                        ESP_LOGW(TAG, "⚠️ UART: не вдалося відправити команду NEXT_TRACK");
+                {
+                    // Исключаем CMD_NEXT_TRACK 0x49
+                    if (cmd == CMD_NEXT_TRACK) {
+                        ESP_LOGI(TAG, "⏭️ CAN: Команда 0x49 (CMD_NEXT_TRACK) ігнорується");
+                        break;
                     }
-                } else {
-                    // Иначе - управляем локальным плеером
-                    app_msg.id = APP_NEXT_TRACK;
-                    xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+                    
+                    uint32_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
+                    uint32_t time_since_last = current_time - g_last_next_command_time;
+                    
+                    // Перевіряємо debounce - ігноруємо якщо команда прийшла занадто швидко
+                    if (time_since_last < CAN_COMMAND_DEBOUNCE_MS) {
+                        ESP_LOGW(TAG, "⏭️ CAN: NEXT команда ігнорується (debounce: %lu мс < %d мс)", 
+                                time_since_last, CAN_COMMAND_DEBOUNCE_MS);
+                        break;
+                    }
+                    
+                    g_last_next_command_time = current_time;
+                    ESP_LOGI(TAG, "⏭️ CAN: Команда НАСТУПНИЙ ТРЕК (0x%02X)", cmd);
+                    
+                    // Если в режиме external input - отправляем по UART на внешнее устройство
+                    if (g_mode_external) {
+                        ESP_LOGI(TAG, "🔀 Режим external - отправка по UART");
+                        if (send_i2c_command(LINK_CMD_NEXT_TRACK) != ESP_OK) {
+                            ESP_LOGW(TAG, "⚠️ UART: не вдалося відправити команду NEXT_TRACK");
+                        }
+                    } else {
+                        // Иначе - управляем локальным плеером
+                        app_msg.id = APP_NEXT_TRACK;
+                        xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+                    }
                 }
                 break;
                 
             case 0x80:  // PREV_TRACK (0x8x, де x може бути будь-чим)
-                ESP_LOGI(TAG, "⏮️ CAN: Команда ПОПЕРЕДНІЙ ТРЕК (0x%02X)", cmd);
-                
-                // Если в режиме external input - отправляем по UART на внешнее устройство
-                if (g_mode_external) {
-                    ESP_LOGI(TAG, "🔀 Режим external - отправка по UART");
-                    if (send_i2c_command(LINK_CMD_PREV_TRACK) != ESP_OK) {
-                        ESP_LOGW(TAG, "⚠️ UART: не вдалося відправити команду PREV_TRACK");
+                {
+                    // Исключаем CMD_PREV_TRACK 0x89
+                    if (cmd == CMD_PREV_TRACK) {
+                        ESP_LOGI(TAG, "⏮️ CAN: Команда 0x89 (CMD_PREV_TRACK) ігнорується");
+                        break;
                     }
-                } else {
-                    // Иначе - управляем локальным плеером
-                    app_msg.id = APP_PREV_TRACK;
-                    xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+                    
+                    uint32_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
+                    uint32_t time_since_last = current_time - g_last_prev_command_time;
+                    
+                    // Перевіряємо debounce - ігноруємо якщо команда прийшла занадто швидко
+                    if (time_since_last < CAN_COMMAND_DEBOUNCE_MS) {
+                        ESP_LOGW(TAG, "⏮️ CAN: PREV команда ігнорується (debounce: %lu мс < %d мс)", 
+                                time_since_last, CAN_COMMAND_DEBOUNCE_MS);
+                        break;
+                    }
+                    
+                    g_last_prev_command_time = current_time;
+                    ESP_LOGI(TAG, "⏮️ CAN: Команда ПОПЕРЕДНІЙ ТРЕК (0x%02X)", cmd);
+                    
+                    // Если в режиме external input - отправляем по UART на внешнее устройство
+                    if (g_mode_external) {
+                        ESP_LOGI(TAG, "🔀 Режим external - отправка по UART");
+                        if (send_i2c_command(LINK_CMD_PREV_TRACK) != ESP_OK) {
+                            ESP_LOGW(TAG, "⚠️ UART: не вдалося відправити команду PREV_TRACK");
+                        }
+                    } else {
+                        // Иначе - управляем локальным плеером
+                        app_msg.id = APP_PREV_TRACK;
+                        xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+                    }
                 }
                 break;
                 
             case 0x10:  // MODE_SWITCH (0x1x, де x може бути будь-чим)
+                // Исключаем CMD_MODE_SWITCH 0x19
+                if (cmd == CMD_MODE_SWITCH) {
+                    ESP_LOGI(TAG, "🔄 CAN: Команда 0x19 (CMD_MODE_SWITCH) ігнорується");
+                    break;
+                }
+                
                 ESP_LOGI(TAG, "🔄 CAN: Команда ПЕРЕМИКАННЯ РЕЖИМУ (0x%02X)", cmd);
                 app_msg.id = APP_MODE_SWITCH;
                 xQueueSend(app_queue, &app_msg, portMAX_DELAY);
@@ -1534,6 +1712,8 @@ static void can_task(void *arg)
             // 📊 Оновлюємо статистику
             g_can_frames_per_second++;
             g_can_bytes_per_second += (4 + message.data_length_code);  // ID(2) + FLAGS(1) + DLC(1) + DATA
+            g_can_total_frames++;
+            g_can_total_bytes += 4 + message.data_length_code;
             
             // 📡 ВІДПРАВЛЯЄМО CAN-дані через Wi-Fi на ПК
             esp_err_t wifi_ret = wifi_can_sniffer_send(
@@ -1979,6 +2159,408 @@ static void play_prev_track(void) {
     //send_can_event(EVENT_TRACK_CHANGED, g_current_track + 1, 0x00); // 0x00 = назад
 }
 
+/**
+ * 📱 BLE статус отримання - отримує поточний статус плеєра
+ */
+static void ble_get_player_status(ble_player_status_t *status) {
+    if (status == NULL) return;
+    
+    status->current_track = g_current_track;
+    status->position_ms = g_last_saved_position;
+    status->duration_ms = g_current_track_duration_ms;
+    status->is_paused = g_is_paused;
+    status->playlist_size = g_playlist_size;
+    status->mode_external = g_mode_external;
+    status->sniffer_enabled = g_sniffer_enabled;
+}
+
+static size_t ble_get_player_playlist(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return 0;
+    }
+
+    size_t used = 0;
+    buffer[0] = '\0';
+    for (int i = 0; i < g_playlist_size; i++) {
+        const char *track_name = strrchr(g_playlist[i], '/');
+        track_name = track_name ? track_name + 1 : g_playlist[i];
+        size_t name_length = strlen(track_name);
+        size_t separator_length = used > 0 ? 1 : 0;
+        if (name_length + separator_length >= buffer_size - used) {
+            break;
+        }
+
+        if (separator_length) {
+            buffer[used++] = '|';
+        }
+        memcpy(buffer + used, track_name, name_length);
+        used += name_length;
+        buffer[used] = '\0';
+    }
+
+    return used;
+}
+
+static size_t ble_rpc_return_json(cJSON *root, char *response, size_t response_size)
+{
+    if (root == NULL || response == NULL || response_size == 0) {
+        cJSON_Delete(root);
+        return 0;
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (json == NULL) {
+        return 0;
+    }
+
+    size_t length = strlen(json);
+    if (length >= response_size) {
+        length = response_size - 1;
+    }
+    memcpy(response, json, length);
+    response[length] = '\0';
+    cJSON_free(json);
+    return length;
+}
+
+static const char *ble_rpc_string(cJSON *root, const char *name, const char *fallback)
+{
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, name);
+    return cJSON_IsString(value) ? value->valuestring : fallback;
+}
+
+static void ble_restart_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(750));
+    esp_restart();
+}
+
+static bool ble_rpc_save_component_logs(cJSON *root)
+{
+    const char *keys[] = {"player", "wifi_can_sniffer", "web_ota", "uart_ota", "elm327"};
+    const char *nvs_keys[] = {"player_logs", "wifi_logs", "web_ota_logs", "uart_ota_logs", "elm327_logs"};
+    bool *flags[] = {&g_player_logs, &g_wifi_can_sniffer_logs, &g_web_ota_logs,
+                     &g_uart_ota_logs, &g_elm327_logs};
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
+        return false;
+    }
+
+    esp_err_t err = ESP_OK;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, keys[i]);
+        if (cJSON_IsNumber(value)) {
+            *flags[i] = value->valueint != 0;
+        }
+        if (err == ESP_OK) {
+            err = nvs_set_u8(handle, nvs_keys[i], *flags[i] ? 1 : 0);
+        }
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    esp_log_level_set("Player", g_player_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+    esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+    esp_log_level_set("web_ota", g_web_ota_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+    return err == ESP_OK;
+}
+
+static size_t ble_rpc_handler(const char *request, char *response, size_t response_size)
+{
+    if (request == NULL || response == NULL || response_size == 0) {
+        return 0;
+    }
+
+    char request_copy[512];
+    strlcpy(request_copy, request, sizeof(request_copy));
+    char *payload = strchr(request_copy, ':');
+    if (payload) {
+        *payload++ = '\0';
+    }
+
+    if (strcmp(request_copy, "logs.get") == 0) {
+        size_t length = web_ota_copy_logs(response, response_size);
+        if (length == 0 && response_size > 1) {
+            response[0] = '\n';
+            response[1] = '\0';
+            return 1;
+        }
+        return length;
+    }
+
+    if (strcmp(request_copy, "wifi.get") == 0) {
+        char sta_ssid[32] = "", sta_password[64] = "";
+        char ap_ssid[32] = "", ap_password[64] = "";
+        int mode = 0;
+        if (get_wifi_settings(sta_ssid, sizeof(sta_ssid), sta_password, sizeof(sta_password),
+                              ap_ssid, sizeof(ap_ssid), ap_password, sizeof(ap_password), &mode) != ESP_OK) {
+            return 0;
+        }
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddStringToObject(root, "sta_ssid", sta_ssid);
+        cJSON_AddStringToObject(root, "sta_password", "");
+        cJSON_AddStringToObject(root, "ap_ssid", ap_ssid);
+        cJSON_AddStringToObject(root, "ap_password", "");
+        cJSON_AddNumberToObject(root, "mode", mode);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "wifi.set") == 0 && payload) {
+        cJSON *root = cJSON_Parse(payload);
+        if (!root) return 0;
+        char sta_ssid[32] = "", sta_password[64] = "";
+        char ap_ssid[32] = "", ap_password[64] = "";
+        int mode = 0;
+        esp_err_t err = get_wifi_settings(sta_ssid, sizeof(sta_ssid), sta_password, sizeof(sta_password),
+                                          ap_ssid, sizeof(ap_ssid), ap_password, sizeof(ap_password), &mode);
+        if (err == ESP_OK) {
+            const char *value = ble_rpc_string(root, "sta_ssid", sta_ssid);
+            strlcpy(sta_ssid, value, sizeof(sta_ssid));
+            value = ble_rpc_string(root, "ap_ssid", ap_ssid);
+            strlcpy(ap_ssid, value, sizeof(ap_ssid));
+            value = ble_rpc_string(root, "sta_password", "");
+            if (value[0]) strlcpy(sta_password, value, sizeof(sta_password));
+            value = ble_rpc_string(root, "ap_password", "");
+            if (value[0]) strlcpy(ap_password, value, sizeof(ap_password));
+            const cJSON *mode_value = cJSON_GetObjectItemCaseSensitive(root, "mode");
+            if (cJSON_IsNumber(mode_value)) mode = mode_value->valueint;
+            if (mode < 0 || mode > 1) err = ESP_ERR_INVALID_ARG;
+            else err = set_wifi_settings(sta_ssid, sta_password, ap_ssid, ap_password, mode);
+        }
+        cJSON_Delete(root);
+        cJSON *result = cJSON_CreateObject();
+        if (!result) return 0;
+        cJSON_AddBoolToObject(result, "success", err == ESP_OK);
+        if (err != ESP_OK) cJSON_AddStringToObject(result, "error", esp_err_to_name(err));
+        return ble_rpc_return_json(result, response, response_size);
+    }
+
+    if (strcmp(request_copy, "sleep.get") == 0) {
+        int mode = 0, timeout = 30;
+        if (get_sleep_settings(&mode, &timeout) != ESP_OK) return 0;
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "sleep_mode", mode);
+        cJSON_AddNumberToObject(root, "idle_timeout_sec", timeout);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "sleep.set") == 0 && payload) {
+        cJSON *root = cJSON_Parse(payload);
+        if (!root) return 0;
+        const cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "sleep_mode");
+        const cJSON *timeout = cJSON_GetObjectItemCaseSensitive(root, "idle_timeout_sec");
+        esp_err_t err = cJSON_IsNumber(mode) && cJSON_IsNumber(timeout)
+                      ? set_sleep_settings(mode->valueint, timeout->valueint) : ESP_ERR_INVALID_ARG;
+        cJSON_Delete(root);
+        cJSON *result = cJSON_CreateObject();
+        if (!result) return 0;
+        cJSON_AddBoolToObject(result, "success", err == ESP_OK);
+        if (err != ESP_OK) cJSON_AddStringToObject(result, "error", esp_err_to_name(err));
+        return ble_rpc_return_json(result, response, response_size);
+    }
+
+    if (strcmp(request_copy, "log_level.get") == 0) {
+        int length = snprintf(response, response_size, "%d", esp_log_level_get("*"));
+        return length > 0 && (size_t)length < response_size ? (size_t)length : 0;
+    }
+    if (strcmp(request_copy, "log_level.set") == 0 && payload) {
+        int level = atoi(payload);
+        if (level < ESP_LOG_NONE || level > ESP_LOG_VERBOSE) return 0;
+        esp_log_level_set("*", level);
+        nvs_handle_t handle;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+            nvs_set_u8(handle, "log_level", level);
+            nvs_commit(handle);
+            nvs_close(handle);
+        }
+        strlcpy(response, "OK", response_size);
+        return strlen(response);
+    }
+
+    if (strcmp(request_copy, "verbose.get") == 0) {
+        strlcpy(response, g_verbose_logs ? "1" : "0", response_size);
+        return strlen(response);
+    }
+    if (strcmp(request_copy, "verbose.set") == 0 && payload) {
+        g_verbose_logs = atoi(payload) != 0;
+        nvs_handle_t handle;
+        if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) == ESP_OK) {
+            nvs_set_u8(handle, "verbose_logs", g_verbose_logs ? 1 : 0);
+            nvs_commit(handle);
+            nvs_close(handle);
+        }
+        strlcpy(response, "OK", response_size);
+        return strlen(response);
+    }
+
+    if (strcmp(request_copy, "component_logs.get") == 0 ||
+        strcmp(request_copy, "component_logs.set") == 0) {
+        cJSON *root = strcmp(request_copy, "component_logs.set") == 0 && payload
+                    ? cJSON_Parse(payload) : cJSON_CreateObject();
+        if (!root) return 0;
+        if (strcmp(request_copy, "component_logs.set") == 0 && !ble_rpc_save_component_logs(root)) {
+            cJSON_Delete(root);
+            return 0;
+        }
+        cJSON_Delete(root);
+        root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "player", g_player_logs ? 1 : 0);
+        cJSON_AddNumberToObject(root, "wifi_can_sniffer", g_wifi_can_sniffer_logs ? 1 : 0);
+        cJSON_AddNumberToObject(root, "web_ota", g_web_ota_logs ? 1 : 0);
+        cJSON_AddNumberToObject(root, "uart_ota", g_uart_ota_logs ? 1 : 0);
+        cJSON_AddNumberToObject(root, "elm327", g_elm327_logs ? 1 : 0);
+        cJSON_AddBoolToObject(root, "success", true);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "system_info.get") == 0) {
+        const esp_app_desc_t *app = esp_app_get_description();
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "free_heap", heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+        cJSON_AddNumberToObject(root, "total_heap", heap_caps_get_total_size(MALLOC_CAP_DEFAULT));
+        cJSON_AddNumberToObject(root, "free_psram", heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        cJSON_AddNumberToObject(root, "total_psram", heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+        cJSON_AddNumberToObject(root, "uptime_ms", esp_timer_get_time() / 1000);
+        cJSON_AddStringToObject(root, "firmware_version", app ? app->version : "unknown");
+        cJSON_AddStringToObject(root, "build_date", __DATE__);
+        cJSON_AddStringToObject(root, "build_time", __TIME__);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "version.get") == 0) {
+        char player_date[16] = "Unknown", player_time[16] = "Unknown";
+        char web_date[16] = "Unknown", web_time[16] = "Unknown";
+        char uart_date[16] = "Unknown", uart_time[16] = "Unknown";
+        nvs_handle_t handle;
+        if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+            size_t length = sizeof(player_date);
+            nvs_get_str(handle, NVS_KEY_PLAYER_DATE, player_date, &length);
+            length = sizeof(player_time);
+            nvs_get_str(handle, NVS_KEY_PLAYER_TIME, player_time, &length);
+            nvs_close(handle);
+        }
+        if (nvs_open("web_ota", NVS_READONLY, &handle) == ESP_OK) {
+            size_t length = sizeof(web_date);
+            nvs_get_str(handle, "date", web_date, &length);
+            length = sizeof(web_time);
+            nvs_get_str(handle, "time", web_time, &length);
+            nvs_close(handle);
+        }
+        if (nvs_open("uart_ota", NVS_READONLY, &handle) == ESP_OK) {
+            size_t length = sizeof(uart_date);
+            nvs_get_str(handle, "uart_date", uart_date, &length);
+            length = sizeof(uart_time);
+            nvs_get_str(handle, "uart_time", uart_time, &length);
+            nvs_close(handle);
+        }
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddStringToObject(root, "player_build_date", player_date);
+        cJSON_AddStringToObject(root, "player_build_time", player_time);
+        cJSON_AddStringToObject(root, "web_build_date", web_date);
+        cJSON_AddStringToObject(root, "web_build_time", web_time);
+        cJSON_AddStringToObject(root, "uart_build_date", uart_date);
+        cJSON_AddStringToObject(root, "uart_build_time", uart_time);
+        cJSON_AddStringToObject(root, "slave_main_build_date", "");
+        cJSON_AddStringToObject(root, "slave_main_build_time", "");
+        cJSON_AddStringToObject(root, "slave_crc_build_date", "");
+        cJSON_AddStringToObject(root, "slave_crc_build_time", "");
+        cJSON_AddStringToObject(root, "slave_uart_build_date", "");
+        cJSON_AddStringToObject(root, "slave_uart_build_time", "");
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "device.restart") == 0) {
+        if (xTaskCreate(ble_restart_task, "ble_restart", 2048, NULL, 2, NULL) != pdPASS) {
+            strlcpy(response, "restart failed", response_size);
+        } else {
+            strlcpy(response, "restarting", response_size);
+        }
+        return strlen(response);
+    }
+
+    if (strcmp(request_copy, "can_statistics.get") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "frames_per_second", g_can_frames_per_second);
+        cJSON_AddNumberToObject(root, "bytes_per_second", g_can_bytes_per_second);
+        cJSON_AddNumberToObject(root, "total_frames", (double)g_can_total_frames);
+        cJSON_AddNumberToObject(root, "total_bytes", (double)g_can_total_bytes);
+        cJSON_AddNumberToObject(root, "bitrate", g_can_bitrate);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "sniffer.set") == 0 && payload) {
+        player_control("set_sniffer", atoi(payload) != 0 ? 1 : 0);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "enabled", g_sniffer_enabled);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    cJSON *error = cJSON_CreateObject();
+    if (!error) return 0;
+    cJSON_AddStringToObject(error, "error", "unsupported BLE request");
+    return ble_rpc_return_json(error, response, response_size);
+}
+
+/**
+ * 📱 BLE команди обробник - обробляє команди від BLE клієнта
+ */
+static void ble_command_handler(const char *command, const char *params) {
+    if (command == NULL) return;
+    
+    ESP_LOGI(TAG, "📱 BLE Command: %s (params: %s)", command, params ? params : "");
+    
+    app_message_t app_msg = {0};
+    
+    if (strcasecmp(command, "play") == 0) {
+        if (params && strlen(params) > 0) {
+            int track_idx = atoi(params);
+            app_msg.id = APP_PLAY_TRACK;
+            app_msg.data.int_param = track_idx;
+            ESP_LOGI(TAG, "▶️ Play track %d via BLE", track_idx);
+        } else {
+            app_msg.id = APP_NEXT_TRACK;
+        }
+    } else if (strcasecmp(command, "pause") == 0) {
+        app_msg.id = APP_TOGGLE_PAUSE;
+        ESP_LOGI(TAG, "⏸️ Toggle pause via BLE");
+    } else if (strcasecmp(command, "next") == 0) {
+        app_msg.id = APP_NEXT_TRACK;
+        ESP_LOGI(TAG, "⏭️ Next track via BLE");
+    } else if (strcasecmp(command, "prev") == 0) {
+        app_msg.id = APP_PREV_TRACK;
+        ESP_LOGI(TAG, "⏮️ Previous track via BLE");
+    } else if (strcasecmp(command, "seek") == 0) {
+        if (params && strlen(params) > 0) {
+            int pos_ms = atoi(params);
+            app_msg.id = APP_SEEK_POSITION;
+            app_msg.data.int_param = pos_ms;
+            ESP_LOGI(TAG, "⏩ Seek to %d ms via BLE", pos_ms);
+        }
+    } else if (strcasecmp(command, "status") == 0) {
+        ESP_LOGD(TAG, "📊 Status requested via BLE");
+        return;
+    } else if (strcasecmp(command, "switch_mode") == 0) {
+        app_msg.id = APP_MODE_SWITCH;
+        ESP_LOGI(TAG, "🔀 Switch mode via BLE");
+    }
+    
+    if (app_msg.id != 0) {
+        xQueueSendToBack(app_queue, &app_msg, pdMS_TO_TICKS(100));
+    }
+}
+
 static void enter_deep_sleep(void)
 {
     ESP_LOGI(TAG, "😴 Перехід в глибокий сон...");
@@ -2166,7 +2748,11 @@ static esp_err_t audio_event_cb(audio_element_handle_t el, audio_event_iface_msg
         audio_element_getinfo(el, &info);
         ESP_LOGI(TAG, "🎵 Audio info - Sample rate: %d Hz, Channels: %d, Bits: %d", 
                 info.sample_rates, info.channels, info.bits);
-        
+
+        /* Ми більше не змінюємо I2S-клок з контексту callback (unsafe).
+           Налаштування частоти буде виконуватись з `player_task` після
+           того, як пайплайн гарантовано запущено і writer валідний. */
+
         // Перевіримо чи це MP3 з високим бітрейтом
         if (info.sample_rates > 44100 || (info.bits > 16 && info.channels > 2)) {
             ESP_LOGW(TAG, "⚠️ Високий бітрейт/семпл рейт - можливі проблеми з продуктивністю!");
@@ -2568,8 +3154,16 @@ static void player_task(void *pvParam)
         i2s_cfg.std_cfg.gpio_cfg.ws = 18;
         i2s_cfg.std_cfg.gpio_cfg.dout = 16;
         i2s_cfg.std_cfg.gpio_cfg.din = -1;
-        i2s_cfg.std_cfg.gpio_cfg.mclk = 0;
+          i2s_cfg.std_cfg.gpio_cfg.mclk = 0;
+          i2s_cfg.std_cfg.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
+          i2s_cfg.std_cfg.slot_cfg.slot_mode = I2S_SLOT_MODE_STEREO;
 
+        /* Increase I2S DMA/ring parameters where possible to reduce underruns.
+           These fields are optional on some ADF versions; check and set if present. */
+    #ifdef I2S_STREAM_STD_CONFIG_HAS_DMA
+        i2s_cfg.std_cfg.dma_desc_num = 8;
+        i2s_cfg.std_cfg.dma_frame_num = 1024;
+    #endif
         i2s_stream_writer = i2s_stream_init(&i2s_cfg);
         
         // 🎵 Створити декодер для MP3
@@ -2626,8 +3220,10 @@ static void player_task(void *pvParam)
         
         // 📞 Встановити callback для відстеження завершення
         audio_element_set_event_callback(fatfs_stream_reader, audio_event_cb, &playback_finished);
-        
-        // 🎯 Додамо callback для всіх елементів для моніторингу продуктивності
+
+        // 🎯 Додамо callback для моніторингу продуктивності
+        // Не передаємо handle writer як ctx (unsafe) — clock буде змінюватися
+        // безпечно з `player_task` після старту пайплайну.
         audio_element_set_event_callback(decoder, audio_event_cb, NULL);
         audio_element_set_event_callback(i2s_stream_writer, audio_event_cb, NULL);
 
@@ -2715,6 +3311,16 @@ static void player_task(void *pvParam)
                     } else {
                         g_current_track_duration_ms = 180000; // За замовчуванням 3 хв
                     }
+                }
+
+                // Use the decoder's actual output format, not a pre-scan of the MP3 header.
+                audio_element_info_t dec_info = {0};
+                if (audio_element_getinfo(decoder, &dec_info) == ESP_OK &&
+                    dec_info.sample_rates > 0 && dec_info.channels > 0 && dec_info.bits > 0) {
+                    ESP_LOGI(TAG, "🔧 Налаштування I2S: %d Hz, %d bit, %d ch",
+                             dec_info.sample_rates, dec_info.bits, dec_info.channels);
+                    i2s_stream_set_clk(i2s_stream_writer, dec_info.sample_rates,
+                                       dec_info.bits, dec_info.channels);
                 }
                 
                 // 🌅 СПРОБА ВІДНОВЛЕННЯ ПОЗИЦІЇ
@@ -2895,6 +3501,21 @@ static void player_task(void *pvParam)
                 }
             }
             
+            // Periodic diagnostics: каждую секунду выводим состояние буферов и память
+            /* static int diag_counter = 0;
+            if (++diag_counter >= 10) { // ~1 second (10 * 100ms)
+                diag_counter = 0;
+                audio_element_info_t di = {0};
+                audio_element_info_t wi = {0};
+                if (audio_element_getinfo(decoder, &di) == ESP_OK) {
+                    ESP_LOGI(TAG, "DIAG decoder: sample_rate=%d, channels=%d, bits=%d, byte_pos=%d, total=%d", di.sample_rates, di.channels, di.bits, (int)di.byte_pos, (int)di.total_bytes);
+                }
+                if (audio_element_getinfo(i2s_stream_writer, &wi) == ESP_OK) {
+                    ESP_LOGI(TAG, "DIAG writer: sample_rate=%d, channels=%d, bits=%d, bytes_in_rb=%d", wi.sample_rates, wi.channels, wi.bits, (int)wi.byte_pos);
+                }
+                ESP_LOGI(TAG, "DIAG free_heap=%d", esp_get_free_heap_size());
+            }*/
+
             vTaskDelay(pdMS_TO_TICKS(100));
         }
 
@@ -2953,15 +3574,13 @@ next_track:
 
         if (g_skip_to_prev) {
             g_skip_to_prev = false;
-            g_current_track = (g_current_track - 1 + g_playlist_size) % g_playlist_size;
+            // g_current_track вже змінено в play_prev_track(), не треба додаткової зміни
         } else if (g_skip_to_next) {
             g_skip_to_next = false;
-            if (!g_play_specific_track) {
-                g_current_track = (g_current_track + 1) % g_playlist_size;
-            }
+            // g_current_track вже змінено в play_next_track() або play_specific_track(), не треба +1
             g_play_specific_track = false;
         } else {
-            // Автоматичне переключення на наступний трек
+            // Автоматичне переключення на наступний трек (коли файл закінчився сам)
             g_current_track = (g_current_track + 1) % g_playlist_size;
         }
         
@@ -3425,6 +4044,68 @@ void player_control(const char* cmd, int track) {
     } else if (strcmp(cmd, "prev") == 0) {
         g_skip_to_prev = true;
         ESP_LOGI(TAG, "🌐 Веб: попередній трек");
+    } else if (strcmp(cmd, "switch_mode") == 0) {
+        ESP_LOGI(TAG, "🌐 Web: switch_mode requested");
+        // Надсилаємо повідомлення, як і для клавіші 'm'
+        app_message_t msg;
+        msg.id = APP_MODE_SWITCH;
+        xQueueSend(app_queue, &msg, 0);
+    } else if (strcmp(cmd, "toggle_sniffer") == 0) {
+        if (!g_sniffer_enabled) {
+            ESP_LOGI(TAG, "🌐 Web: enabling WiFi CAN Sniffer via web toggle");
+            wifi_can_sniffer_config_t cfg = {
+                .wifi_ssid = WIFI_SSID,
+                .wifi_password = WIFI_PASSWORD,
+                .pc_ip_str = PC_IP_ADDR,
+                .udp_port = UDP_PORT,
+                .on_can_message = wifi_can_on_message_callback,
+                .on_control_command = wifi_can_on_control_callback,
+            };
+            if (wifi_can_sniffer_init(&cfg) == ESP_OK) {
+                g_sniffer_enabled = true;
+                save_sniffer_enabled(1);
+                ESP_LOGI(TAG, "✅ Sniffer enabled (saved)");
+            } else {
+                ESP_LOGE(TAG, "❌ Failed to enable sniffer");
+            }
+        } else {
+            ESP_LOGI(TAG, "🌐 Web: disabling WiFi CAN Sniffer via web toggle");
+            wifi_can_sniffer_deinit();
+            g_sniffer_enabled = false;
+            save_sniffer_enabled(0);
+            ESP_LOGI(TAG, "✅ Sniffer disabled (saved)");
+        }
+    }
+    else if (strcmp(cmd, "set_sniffer") == 0) {
+        // 'track' parameter is used as state: 1 = enable, 0 = disable
+        if (track == 1) {
+            if (!g_sniffer_enabled) {
+                ESP_LOGI(TAG, "🌐 Web: setting WiFi CAN Sniffer = ON");
+                wifi_can_sniffer_config_t cfg = {
+                    .wifi_ssid = WIFI_SSID,
+                    .wifi_password = WIFI_PASSWORD,
+                    .pc_ip_str = PC_IP_ADDR,
+                    .udp_port = UDP_PORT,
+                    .on_can_message = wifi_can_on_message_callback,
+                    .on_control_command = wifi_can_on_control_callback,
+                };
+                if (wifi_can_sniffer_init(&cfg) == ESP_OK) {
+                    g_sniffer_enabled = true;
+                    save_sniffer_enabled(1);
+                    ESP_LOGI(TAG, "✅ Sniffer enabled (saved)");
+                } else {
+                    ESP_LOGE(TAG, "❌ Failed to enable sniffer");
+                }
+            }
+        } else {
+            if (g_sniffer_enabled) {
+                ESP_LOGI(TAG, "🌐 Web: setting WiFi CAN Sniffer = OFF");
+                wifi_can_sniffer_deinit();
+                g_sniffer_enabled = false;
+                save_sniffer_enabled(0);
+                ESP_LOGI(TAG, "✅ Sniffer disabled (saved)");
+            }
+        }
     }
 }
 
@@ -3447,8 +4128,8 @@ char* get_player_status_json(void) {
     int duration_ms = g_current_track_duration_ms;
     if (duration_ms <= 0) duration_ms = 180000; // Запасний варіант
     
-    snprintf(json, 256, "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,\"playlist_size\":%d}",
-             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false", g_playlist_size);
+    snprintf(json, 256, "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s}",
+             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false", g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false");
     
     return json;
 }
@@ -3478,6 +4159,8 @@ static void wifi_can_on_message_callback(const can_sniffer_frame_t *frame)
     // Обновляем статистику
     g_can_frames_per_second++;
     g_can_bytes_per_second += (4 + frame->length);
+    g_can_total_frames++;
+    g_can_total_bytes += 4 + frame->length;
 }
 
 /**
@@ -3517,6 +4200,82 @@ void app_main(void)
 {
     // 🌙 ПЕРШ ЗА ВСЕ: перевіряємо пробудження від сну
     esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+    
+    // Рано ініціалізуємо NVS для завантаження налаштувань логів
+    esp_err_t nvs_err = init_nvs();
+    if (nvs_err != ESP_OK) {
+        ESP_LOGE(TAG, "❌ Помилка ініціалізації NVS: %s", esp_err_to_name(nvs_err));
+    } else {
+        // Завантажуємо налаштування логів
+        nvs_handle_t nvs_handle;
+        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Loading component logs from NVS");
+            uint8_t val;
+            if (nvs_get_u8(nvs_handle, "verbose_logs", &val) == ESP_OK) {
+                g_verbose_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded verbose_logs: %d", g_verbose_logs);
+            } else {
+                ESP_LOGI(TAG, "Failed to load verbose_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "player_logs", &val) == ESP_OK) {
+                g_player_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded player_logs: %d", g_player_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load player_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "wifi_logs", &val) == ESP_OK) {
+                g_wifi_can_sniffer_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded wifi_can_sniffer_logs: %d", g_wifi_can_sniffer_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load wifi_can_sniffer_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "web_ota_logs", &val) == ESP_OK) {
+                g_web_ota_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded web_ota_logs: %d", g_web_ota_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load web_ota_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "uart_ota_logs", &val) == ESP_OK) {
+                g_uart_ota_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded uart_ota_logs: %d", g_uart_ota_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load uart_ota_logs from NVS");
+            }
+            if (nvs_get_u8(nvs_handle, "elm327_logs", &val) == ESP_OK) {
+                g_elm327_logs = (val != 0);
+                ESP_LOGI(TAG, "Loaded elm327_logs: %d", g_elm327_logs);
+            } else {
+                ESP_LOGE(TAG, "Failed to load elm327_logs from NVS");
+            }
+            nvs_close(nvs_handle);
+        } else {
+            ESP_LOGE(TAG, "Failed to open NVS for loading component logs: %s", esp_err_to_name(err));
+        }
+    }
+    
+    // Встановлюємо рівні логів на основі налаштувань
+    esp_log_level_set("*", ESP_LOG_WARN);               // ⚠️ Інші компоненти - попередження
+    esp_log_level_set("BLE_Player", ESP_LOG_INFO);
+    esp_log_level_set("Player", g_player_logs ? ESP_LOG_INFO : ESP_LOG_NONE);          // ℹ️ Наш код - інформаційний рівень (TAG = "Player")
+    esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);  // ✅ Дозволяємо бачити логи Wi-Fi CAN sniffer
+    // Ініціалізація TCP/IP стеку та дефолтного event-loop — робимо один раз тут
+    esp_err_t _neterr = esp_netif_init();
+    if (_neterr != ESP_OK && _neterr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "❌ esp_netif_init failed: %s", esp_err_to_name(_neterr));
+    } else {
+        ESP_LOGI(TAG, "✅ esp_netif_init ok (or already initialized)");
+    }
+    _neterr = esp_event_loop_create_default();
+    if (_neterr != ESP_OK && _neterr != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "❌ esp_event_loop_create_default failed: %s", esp_err_to_name(_neterr));
+    } else {
+        ESP_LOGI(TAG, "✅ esp_event_loop_create_default ok (or already created)");
+    }
+    esp_log_level_set("web_ota", ESP_LOG_WARN);         // 🔄 Дозволяємо бачити логи OTA
+    esp_log_level_set("UART_OTA_MASTER", g_uart_ota_logs ? ESP_LOG_INFO : ESP_LOG_NONE); // 📡 Дозволяємо бачити логи UART OTA
+    esp_log_level_set("ELM327_WIFI", g_elm327_logs ? ESP_LOG_INFO : ESP_LOG_NONE);      // 🔧 Дозволяємо бачити логи ELM327
+    
     if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
         // Пробудження від Deep Sleep по таймеру
         ESP_LOGI(TAG, "🌅 ПРОБУДЖЕННЯ ВІД DEEP SLEEP");
@@ -3529,12 +4288,6 @@ void app_main(void)
     } else {
         ESP_LOGI(TAG, "🌅 Нормальний запуск системи");
     }
-    
-    esp_log_level_set("*", ESP_LOG_WARN);               // ⚠️ Інші компоненти - попередження
-    esp_log_level_set("Player", ESP_LOG_INFO);          // ℹ️ Наш код - інформаційний рівень (TAG = "Player")
-    esp_log_level_set("WiFiCanSniffer", ESP_LOG_INFO);  // ✅ Дозволяємо бачити логи Wi-Fi CAN sniffer
-    esp_log_level_set("web_ota", ESP_LOG_INFO);         // 🔄 Дозволяємо бачити логи OTA
-    esp_log_level_set("UART_OTA_MASTER", ESP_LOG_INFO); // 📡 Дозволяємо бачити логи UART OTA
     
     ESP_LOGI(TAG, "... ...");
     ESP_LOGI(TAG, "╔═══════════════════════════════════════════════╗");
@@ -3555,13 +4308,8 @@ void app_main(void)
     gpio_reset_pin((gpio_num_t)SLEEP_IND_PIN);          // Сбросить настройки пина
     gpio_set_direction((gpio_num_t)SLEEP_IND_PIN, GPIO_MODE_OUTPUT); // Настроить как выход
     gpio_set_level((gpio_num_t)SLEEP_IND_PIN, 1);       // Установить HIGH
-    // === КРИТЕРІЙ 2: Ініціалізація NVS (перевір що немає інших викликів nvs_flash_init) ===
-    ESP_LOGI(TAG, "🗃️ Ініціалізація NVS для збереження позиції...");
-    esp_err_t nvs_err = init_nvs();
-    if (nvs_err != ESP_OK) {
-        ESP_LOGE(TAG, "❌ Помилка ініціалізації NVS: %s", esp_err_to_name(nvs_err));
-    } else {
-        ESP_LOGI(TAG, "✅ NVS ініціалізовано успішно");
+    // === КРИТЕРІЙ 2: NVS вже ініціалізована вище ===
+    {
         // 💾 Зберігаємо версію player при першому запуску або при зміні
         nvs_handle_t nvs_handle;
         esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
@@ -3766,42 +4514,48 @@ if (g_board_handle) {
         ESP_LOGI(TAG, "✅ Обробник кнопки BOOT (GPIO%d) встановлено", APP_QUIT_PIN);
     }
     
-    // 📡 Ініціалізація Wi-Fi CAN-Sniffer
-    ESP_LOGI(TAG, "📡 Ініціалізація Wi-Fi CAN-Sniffer...");
-    // AP налаштування лишаються як було (WIFI_SSID/WIFI_PASSWORD)
-    wifi_can_sniffer_config_t wifi_can_config = {
-        .wifi_ssid = WIFI_SSID,
-        .wifi_password = WIFI_PASSWORD,
-        .pc_ip_str = PC_IP_ADDR,
-        .udp_port = UDP_PORT,
-        .on_can_message = wifi_can_on_message_callback,
-        .on_control_command = wifi_can_on_control_callback,
-    };
-    
-    esp_err_t wifi_can_err = wifi_can_sniffer_init(&wifi_can_config);
-    if (wifi_can_err == ESP_OK) {
-        ESP_LOGI(TAG, "✅ Wi-Fi CAN-Sniffer ініціалізовано");
-        ESP_LOGI(TAG, "   📡 SSID: %s", WIFI_SSID);
-        ESP_LOGI(TAG, "   🖥️  PC IP: %s", PC_IP_ADDR);
-        ESP_LOGI(TAG, "   📊 UDP Port: 0x%04X", UDP_PORT);
-
-        // Запускаем простой веб-OTA сервер на том же Wi-Fi интерфейсе
-        if (web_ota_start() == ESP_OK) {
-            ESP_LOGI(TAG, "🌐 Web OTA доступен: http://192.168.4.1/");
+    // 📡 Wi‑Fi CAN-Sniffer: load saved enabled flag from NVS
+    int saved = 0;
+    load_sniffer_enabled(&saved);
+    if (saved) {
+        ESP_LOGI(TAG, "📡 Wi-Fi CAN-Sniffer saved state = ENABLED — starting at boot");
+        wifi_can_sniffer_config_t wifi_can_config = {
+            .wifi_ssid = WIFI_SSID,
+            .wifi_password = WIFI_PASSWORD,
+            .pc_ip_str = PC_IP_ADDR,
+            .udp_port = UDP_PORT,
+            .on_can_message = wifi_can_on_message_callback,
+            .on_control_command = wifi_can_on_control_callback,
+        };
+        esp_err_t wifi_can_err = wifi_can_sniffer_init(&wifi_can_config);
+        if (wifi_can_err == ESP_OK) {
+            g_sniffer_enabled = true;
+            ESP_LOGI(TAG, "✅ Wi-Fi CAN-Sniffer initialized at boot");
         } else {
-            ESP_LOGW(TAG, "⚠️ Web OTA не запустился");
+            ESP_LOGW(TAG, "⚠️ Failed to init sniffer at boot: %s", esp_err_to_name(wifi_can_err));
         }
-        // Спробувати Wi-Fi підключення з fallback
-        try_wifi_connection_with_fallback();
     } else {
-        ESP_LOGW(TAG, "⚠️ Wi-Fi CAN-Sniffer ініціалізація не вдалась: %s", esp_err_to_name(wifi_can_err));
+        ESP_LOGI(TAG, "📡 Wi-Fi CAN-Sniffer is DISABLED by default. Use web UI to enable.");
     }
+
+    // Запускаємо веб-OTA незалежно від стану сніфера
+    if (web_ota_start() == ESP_OK) {
+        ESP_LOGI(TAG, "🌐 Web OTA доступен: http://192.168.4.1/");
+    } else {
+        ESP_LOGW(TAG, "⚠️ Web OTA не запустился");
+    }
+
+    // Спробувати Wi-Fi підключення з fallback (AP/STA) — робимо це завжди
+    try_wifi_connection_with_fallback();
+
+    // Встановити рівень логів для WiFiCanSniffer (буде використаний, коли сніфер запуститься)
+    esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
     
     ESP_LOGI(TAG, "🎧 Очікування підключення USB флеш-накопичувача...");
     ESP_LOGI(TAG, "✅ Для перемикання треків натисніть кнопку BOOT");
     
     // Запускаємо задачу обробки команд з терміналу
-    if (xTaskCreatePinnedToCore(terminal_commands_task, "terminal_cmd", 2048, NULL, 3, NULL, 0) == pdPASS) {
+    if (xTaskCreatePinnedToCore(terminal_commands_task, "terminal_cmd", 4096, NULL, 3, NULL, 0) == pdPASS) {
         ESP_LOGI(TAG, "⌨️ Terminal commands task started (n=next, p=prev, m=mode)");
     } else {
         ESP_LOGW(TAG, "⚠️ Failed to create terminal commands task");
@@ -3810,7 +4564,21 @@ if (g_board_handle) {
     // ⏳ Затримка для стабілізації системи
     vTaskDelay(pdMS_TO_TICKS(2000));
     
-    // 🔍 Враховуємо останній вибраний режим: якщо external — запускаємо його навіть без USB
+    // � BLE Player Service ініціалізація
+    ESP_LOGI(TAG, "📱 Ініціалізація BLE Player Service...");
+    esp_err_t ble_err = ble_player_service_init();
+    if (ble_err == ESP_OK) {
+        ble_player_set_command_handler(ble_command_handler);
+        ble_player_set_playlist_callback(ble_get_player_playlist);
+        ble_player_set_rpc_callback(ble_rpc_handler);
+        // Запускаємо періодичну відправку статусу кожну секунду
+        ble_player_start_periodic_status(ble_get_player_status, 1000);
+        ESP_LOGI(TAG, "✅ BLE Player Service готовий");
+    } else {
+        ESP_LOGW(TAG, "⚠️ BLE Player Service ініціалізація не вдалася: %s", esp_err_to_name(ble_err));
+    }
+    
+    // �🔍 Враховуємо останній вибраний режим: якщо external — запускаємо його навіть без USB
     if (g_last_source_pref == 1 && !g_mode_external) {
         ESP_LOGI(TAG, "🎚️ Відновлення режиму: External input");
         if (start_external_input() == ESP_OK) {
@@ -4010,7 +4778,54 @@ if (g_board_handle) {
                         }
                     }
                 }
-                            // === КРИТЕРІЙ 13: Обробка відключення USB ===
+                
+                // === BLE команда: Toggle Pause ===
+                else if (msg.id == APP_TOGGLE_PAUSE) {
+                    ESP_LOGI(TAG, "⏸️ BLE: Toggle pause/play");
+                    if (g_player_task_handle != NULL) {
+                        // Если сейчас есть задача плеера — отправим сигнал на паузу
+                        if (g_is_paused) {
+                            // Resume
+                            g_is_paused = false;
+                            ESP_LOGI(TAG, "▶️ Resuming playback via BLE");
+                        } else {
+                            // Pause
+                            g_is_paused = true;
+                            ESP_LOGI(TAG, "⏸️ Pausing playback via BLE");
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "⚠️ No player task running");
+                    }
+                }
+                
+                // === BLE команда: Play specific track ===
+                else if (msg.id == APP_PLAY_TRACK) {
+                    int track_idx = msg.data.int_param;
+                    ESP_LOGI(TAG, "▶️ BLE: Play track %d", track_idx);
+                    if (track_idx >= 0 && track_idx < g_playlist_size) {
+                        g_current_track = track_idx;
+                        g_is_paused = false;
+                        if (g_player_task_handle != NULL) {
+                            // Плеер должен заметить изменение g_current_track и переключиться
+                            ESP_LOGI(TAG, "✅ Switched to track %d", track_idx);
+                        }
+                    } else {
+                        ESP_LOGW(TAG, "⚠️ Invalid track index: %d (playlist size: %d)", track_idx, g_playlist_size);
+                    }
+                }
+                
+                // === BLE команда: Seek to position ===
+                else if (msg.id == APP_SEEK_POSITION) {
+                    int pos_ms = msg.data.int_param;
+                    ESP_LOGI(TAG, "⏩ BLE: Seek to %d ms", pos_ms);
+                    if (pos_ms >= 0) {
+                        g_seek_position_ms = pos_ms;
+                        ESP_LOGI(TAG, "✅ Seek requested to %d ms", pos_ms);
+                    } else {
+                        ESP_LOGW(TAG, "⚠️ Invalid seek position: %d", pos_ms);
+                    }
+                }
+                            // === КРИТЕРІЙ 13: Обработка отключения USB ===
                 else if (msg.id == APP_DEVICE_DISCONNECTED) {
                     ESP_LOGI(TAG, "═══════════════════════════════════════════════");
                     ESP_LOGI(TAG, "🔌 [USB] ПРИСТРІЙ ВІДКЛЮЧЕНО - ПОЧАТОК ОБРОБКИ");
@@ -4291,10 +5106,13 @@ if (g_board_handle) {
  */
 static void terminal_commands_task(void *arg)
 {
-    ESP_LOGI(TAG, "⌨️ Terminal commands task started");
-    ESP_LOGI(TAG, "   n - next track");
-    ESP_LOGI(TAG, "   p - previous track");
-    ESP_LOGI(TAG, "   m - mode switch");
+    if (g_verbose_logs) {
+        ESP_LOGI(TAG, "⌨️ Terminal commands task started");
+        ESP_LOGI(TAG, "   n - next track");
+        ESP_LOGI(TAG, "   p - previous track");
+        ESP_LOGI(TAG, "   m - mode switch");
+        ESP_LOGI(TAG, "   c - clear external I2S RX buffer");
+    }
     
     char ch;
     app_message_t msg;
@@ -4320,9 +5138,17 @@ static void terminal_commands_task(void *arg)
         }
         else if (ch == 's' || ch == 'S') {
             // Одноразове натискання 's' — відправляємо подію перемикання Wi-Fi у STA (DHCP)
-            ESP_LOGI(TAG, "🌐 Натискання 's' — запит на перемикання Wi-Fi у STA (DHCP)");
+            if (g_verbose_logs) ESP_LOGI(TAG, "🌐 Натискання 's' — запит на перемикання Wi-Fi у STA (DHCP)");
             msg.id = APP_WIFI_SWITCH_STA;
             xQueueSend(app_queue, &msg, 0);
+        }
+        else if (ch == 'c' || ch == 'C') {
+            if (g_mode_external && g_i2s_passthrough_task_handle) {
+                g_external_i2s_flush_requested = true;
+                printf("I2S RX buffer flush requested\r\n");
+            } else {
+                printf("I2S RX buffer flush is available only in external mode\r\n");
+            }
         }
         
         vTaskDelay(pdMS_TO_TICKS(10));

@@ -57,7 +57,7 @@ static int32_t submit_headers_shared(nghttp2_session *session, uint8_t flags,
 
   nghttp2_outbound_item_init(item);
 
-  if (dpw != NULL && dpw->data_prd.read_callback != NULL) {
+  if (dpw != NULL && nghttp2_data_provider_wrap_contains_read_callback(dpw)) {
     item->aux_data.headers.dpw = *dpw;
   }
 
@@ -185,7 +185,8 @@ int nghttp2_submit_rst_stream(nghttp2_session *session, uint8_t flags,
     return NGHTTP2_ERR_INVALID_ARGUMENT;
   }
 
-  return nghttp2_session_add_rst_stream(session, stream_id, error_code);
+  return nghttp2_session_add_rst_stream_continue(
+    session, stream_id, error_code, /* continue_without_stream = */ 0);
 }
 
 int nghttp2_submit_goaway(nghttp2_session *session, uint8_t flags,
@@ -486,7 +487,7 @@ int nghttp2_submit_altsvc(nghttp2_session *session, uint8_t flags,
   return 0;
 
 fail_item_malloc:
-  free(buf);
+  nghttp2_mem_free(mem, buf);
 
   return rv;
 }
@@ -569,7 +570,7 @@ int nghttp2_submit_origin(nghttp2_session *session, uint8_t flags,
   return 0;
 
 fail_item_malloc:
-  free(ov_copy);
+  nghttp2_mem_free(mem, ov_copy);
 
   return rv;
 }
@@ -641,14 +642,14 @@ int nghttp2_submit_priority_update(nghttp2_session *session, uint8_t flags,
   return 0;
 
 fail_item_malloc:
-  free(buf);
+  nghttp2_mem_free(mem, buf);
 
   return rv;
 }
 
 static uint8_t set_request_flags(const nghttp2_data_provider_wrap *dpw) {
   uint8_t flags = NGHTTP2_FLAG_NONE;
-  if (dpw == NULL || dpw->data_prd.read_callback == NULL) {
+  if (dpw == NULL || !nghttp2_data_provider_wrap_contains_read_callback(dpw)) {
     flags |= NGHTTP2_FLAG_END_STREAM;
   }
 
@@ -699,7 +700,7 @@ int32_t nghttp2_submit_request2(nghttp2_session *session,
 
 static uint8_t set_response_flags(const nghttp2_data_provider_wrap *dpw) {
   uint8_t flags = NGHTTP2_FLAG_NONE;
-  if (dpw == NULL || dpw->data_prd.read_callback == NULL) {
+  if (dpw == NULL || !nghttp2_data_provider_wrap_contains_read_callback(dpw)) {
     flags |= NGHTTP2_FLAG_END_STREAM;
   }
   return flags;

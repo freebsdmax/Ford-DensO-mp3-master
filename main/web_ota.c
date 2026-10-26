@@ -6,10 +6,82 @@
 #include "web_ota.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
 
-#include <string.h>
-#include "uart_version.h"
-#include "player_version.h"
+#include <stdarg.h> // for va_list
+
+#define LOG_BUFFER_SIZE 4096
+
+static char log_buffer[LOG_BUFFER_SIZE];
+
+static int log_write_pos = 0;
+static size_t log_valid_bytes = 0;
+static portMUX_TYPE log_buffer_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static vprintf_like_t original_vprintf = NULL;
+
+// Глобальний прапор для детальних логів
+bool g_verbose_logs = false;
+// Прапори для логів компонентів
+bool g_player_logs = true;
+bool g_wifi_can_sniffer_logs = true;
+bool g_web_ota_logs = true;
+bool g_uart_ota_logs = true;
+bool g_elm327_logs = true;
+
+int log_vprintf(const char *fmt, va_list args) {
+
+    char temp[256];
+    va_list original_args;
+    va_copy(original_args, args);
+    int len = vsnprintf(temp, sizeof(temp), fmt, args);
+    size_t count = len > 0 ? (size_t)len : 0;
+    if (count >= sizeof(temp)) {
+        count = sizeof(temp) - 1;
+    }
+
+    portENTER_CRITICAL(&log_buffer_mux);
+    for (size_t i = 0; i < count; i++) {
+        log_buffer[log_write_pos] = temp[i];
+        log_write_pos = (log_write_pos + 1) % LOG_BUFFER_SIZE;
+    }
+    log_valid_bytes += count;
+    if (log_valid_bytes > LOG_BUFFER_SIZE) {
+        log_valid_bytes = LOG_BUFFER_SIZE;
+    }
+    portEXIT_CRITICAL(&log_buffer_mux);
+
+    // Call original to keep serial output
+    int result;
+    if (original_vprintf) {
+        result = original_vprintf(fmt, original_args);
+    } else {
+        result = vprintf(fmt, original_args);
+    }
+    va_end(original_args);
+    return result;
+
+}
+
+size_t web_ota_copy_logs(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return 0;
+    }
+
+    portENTER_CRITICAL(&log_buffer_mux);
+    size_t count = log_valid_bytes;
+    if (count >= buffer_size) {
+        count = buffer_size - 1;
+    }
+    int start = (log_write_pos - (int)count + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
+    for (size_t i = 0; i < count; i++) {
+        buffer[i] = log_buffer[(start + i) % LOG_BUFFER_SIZE];
+    }
+    buffer[count] = '\0';
+    portEXIT_CRITICAL(&log_buffer_mux);
+    return count;
+}
 
 // Extern declarations for player control functions
 extern char* get_playlist_json(void);
@@ -49,12 +121,6 @@ void web_ota_save_version(void)
     }
 }
 static httpd_handle_t s_server = NULL;
-
-// 🔄 Helper функція для відновлення watchdog
-static void restore_watchdog(const esp_task_wdt_config_t *old_config) {
-    ESP_LOGI(TAG, "Restoring normal watchdog timeout...");
-    esp_task_wdt_reconfigure(old_config);
-}
 
 // Forward declaration
 extern esp_err_t uart_ota_send_firmware(const uint8_t *firmware_data, size_t firmware_size,
@@ -285,33 +351,52 @@ static const char *INDEX_HTML =
 "  font-weight: 500;"
 "}"
 "@media (max-width: 600px) {"
-"  body { padding: 10px; }"
+"  body { padding: 8px; }"
 "  .container { margin: 0; border-radius: 0; }"
-"  .header { padding: 1.5rem 1rem; }"
-"  .header h2 { font-size: 1.5rem; }"
-"  .tabs { flex-direction: column; }"
-"  .tab { padding: 1rem; font-size: 1.1rem; }"
-"  .btn { padding: 1rem; font-size: 1.2rem; margin: 0.25rem; }"
-"  #playlist li { padding: 1rem; font-size: 1.1rem; }"
-"  .section { padding: 1rem; }"
-"  .tab-content { padding: 1rem; }"
+"  .header { padding: 1rem 0.75rem; }"
+"  .header h2 { font-size: 1.2rem; }"
+"  .tabs { flex-direction: column; gap:0.25rem; }"
+"  .tab { padding: 0.75rem; font-size: 1rem; width:100%; box-sizing:border-box; }"
+"  .btn { padding: 0.75rem; font-size: 1rem; margin: 0.25rem 0; min-width:0; }"
+"  #playlist li { padding: 0.85rem; font-size: 1rem; }"
+"  .section { padding: 0.85rem; }"
+"  .tab-content { padding: 0.75rem; }"
+"  .controls { display:flex; gap:0.5rem; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:0.25rem; }"
+"  .controls .btn { flex: 0 0 auto; min-width: 96px; padding: 0.6rem 0.8rem; }"
+"  .controls .btn:nth-child(odd) { margin-right:0; }"
+"  .switch { transform: scale(1.05); }"
+"  .slider:before { height:20px; width:20px; left:4px; bottom:4px; }"
 "}"
+".controls { display:flex; gap:0.5rem; align-items:center; flex-wrap:nowrap; }"
+".switch { position: relative; display: inline-block; width:50px; height:28px; }"
+".switch input { opacity: 0; width: 0; height: 0; }"
+".slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .2s; border-radius: 28px; }"
+".slider:before { position: absolute; content: \"\"; height: 22px; width: 22px; left: 3px; bottom: 3px; background-color: white; transition: .2s; border-radius: 50%; }"
+"input:checked + .slider { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }"
+"input:checked + .slider:before { transform: translateX(22px); }"
 "</style></head><body>"
-"<h2>🎵 ESP32 Music Player</h2>"
+"<div class='container'>"
+"  <div class='header'>"
+"    <h2>🎵 ESP32 Music Player</h2>"
+"    <p class='lead'>Manage music, OTA and Wi‑Fi CAN Sniffer — clean, fast control for your device.</p>"
+"  </div>"
+"  <div style='padding:0 1rem 1rem 1rem;'>"
 "<div class='tabs'>"
-"  <div class='tab active' data-tab='player'>🎵 Плеер</div>"
-"  <div class='tab' data-tab='ota'>🔧 OTA-обновление</div>"
+"  <div class='tab active' data-tab='player'>🎵 Плеєр</div>"
+"  <div class='tab' data-tab='ota'>🔧 OTA-оновлення</div>"
 "  <div class='tab' data-tab='settings'>⚙️ Налаштування</div>"
+"  <div class='tab' data-tab='monitoring'>📊 Моніторинг</div>"
 "</div>"
-"<div class='tab-content active' id='tab-player'>"
+"  <div class='tab-content active' id='tab-player'>"
 "  <div class='section'>"
-"    <h3>Управление плеером</h3>"
-"    <div style='margin-bottom:1rem;'>"
-"      <button class='btn' onclick=\"playerCmd('prev')\">⏮️ Предыдущий</button>"
-"      <button class='btn' onclick=\"playerCmd('play')\">▶️ Пуск</button>"
-"      <button class='btn' onclick=\"playerCmd('pause')\">⏸️ Пауза</button>"
-"      <button class='btn' onclick=\"playerCmd('next')\">⏭️ Следующий</button>"
-"    </div>"
+"    <h3>Керування плеєром</h3>"
+"    <div class='controls' style='margin-bottom:1rem;'>" 
+"      <button class='btn' onclick=\"playerCmd('prev')\">⏮️ Назад</button>" 
+"      <button class='btn' onclick=\"playerCmd('play')\">▶️ Відтворити</button>" 
+"      <button class='btn' onclick=\"playerCmd('pause')\">⏸️ Пауза</button>" 
+"      <button class='btn' onclick=\"playerCmd('next')\">⏭️ Далі</button>" 
+"      <button class='btn' onclick=\"playerCmd('switch_mode')\">🔄 Режим</button>" 
+"    </div>" 
 "    <div id='player-status' class='status info' style='margin-bottom:1rem;'></div>"
 "    <div style='margin-bottom:1rem;'>"
 "      <input type='range' id='progress-bar' min='0' max='100' value='0'>"
@@ -324,13 +409,13 @@ static const char *INDEX_HTML =
 "  <div class='section'><h3>📱 Master ESP32 (цей пристрій)</h3>"
 "    <form method='POST' action='/upload' enctype='application/octet-stream' id='f1'>"
 "      <input type='file' id='file1' required><br>"
-"      <button class='btn' type='submit'>Upload & Update Master</button>"
+"      <button class='btn' type='submit'>Завантажити та оновити Master</button>"
 "    </form>"
 "  </div>"
 "  <div class='section'><h3>🎵 Slave ESP32 (Bluetooth модуль через UART)</h3>"
 "    <form method='POST' action='/upload_slave' enctype='application/octet-stream' id='f2'>"
 "      <input type='file' id='file2' required><br>"
-"      <button class='btn' type='submit'>Upload & Update Slave</button>"
+"      <button class='btn' type='submit'>Завантажити та оновити Slave</button>"
 "    </form>"
 "  </div>"
 "  <div class='section'><h3>ℹ️ Інформація про версії</h3>"
@@ -345,7 +430,16 @@ static const char *INDEX_HTML =
 "</div>"
 "<div class='tab-content' id='tab-settings'>"
 "  <div class='section'>"
-"    <h3>🌐 Wi-Fi налаштування</h3>"
+"    <div style='display:flex; align-items:center; justify-content:space-between;'>"
+"      <h3>🌐 Wi-Fi налаштування</h3>"
+"      <div style='display:flex; align-items:center; gap:0.5rem;'>"
+"        <label style='font-weight:600;margin-right:0.5rem;'>WiFi CAN Sniffer</label>"
+"        <label class='switch'>"
+"          <input type='checkbox' id='sniffer-enabled'>"
+"          <span class='slider'></span>"
+"        </label>"
+"      </div>"
+"    </div>"
 "    <form id='wifi-form'>"
 "      <h4>STA режим (підключення до існуючої мережі)</h4>"
 "      <label>STA SSID (ім'я мережі):</label><br>"
@@ -382,11 +476,33 @@ static const char *INDEX_HTML =
 "        <option value='3'>Deep Sleep</option>"
 "      </select><br>"
 "      <label>Час бездіяльності (секунди, min 10):</label><br>"
-"      <input type='number' id='idle-timeout' min='10' max='28800' value='30'><br><br>"
-"      <button class='btn btn-secondary' type='button' onclick='loadSleepSettings()'>Завантажити налаштування</button>"
-"      <button class='btn' type='button' onclick='saveSleepSettings()'>Зберегти налаштування</button>"
+"      <input type='number' id='idle-timeout' min='10' max='28800' value='30'><br>"
+"      <label>Рівень логів:</label><br>"
+"      <select id='log-level'>"
+"        <option value='0'>None</option>"
+"        <option value='1'>Error</option>"
+"        <option value='2'>Warn</option>"
+"        <option value='3'>Info</option>"
+"        <option value='4'>Debug</option>"
+"        <option value='5'>Verbose</option>"
+"      </select><br>"
+"      <label><input type='checkbox' id='verbose-logs'> Детальні логи (емодзі та банери)</label><br><br>"
+"      <h4>Логи компонентів:</h4>"
+"      <label><input type='checkbox' id='player-logs' checked> Player</label><br>"
+"      <label><input type='checkbox' id='wifi-can-sniffer-logs' checked> WiFi CAN Sniffer</label><br>"
+"      <label><input type='checkbox' id='web-ota-logs' checked> Web OTA</label><br>"
+"      <label><input type='checkbox' id='uart-ota-logs' checked> UART OTA</label><br>"
+"      <label><input type='checkbox' id='elm327-logs' checked> ELM327</label><br><br>"
+"      <button class='btn btn-secondary' type='button' onclick='loadSleepSettings(); loadLogLevel(); loadVerboseLogs(); loadComponentLogs()'>Завантажити налаштування</button>"
+"      <button class='btn' type='button' onclick='saveSleepSettings(); saveLogLevel(); saveVerboseLogs(); saveComponentLogs()'>Зберегти налаштування</button>"
+"      <button class='btn btn-danger' type='button' onclick='restartDevice()'>Перезавантажити пристрій</button>"
 "      <div id='sleep-status' style='margin-top:1rem;color:#06c;'></div>"
 "    </form>"
+"  </div>"
+"</div>"
+"<div class='tab-content' id='tab-monitoring'>"
+"  <div class='section'><h3>📊 Логи системи</h3>"
+"    <pre id='log-output' style='background:#000;color:#0f0;padding:1rem;font-family:monospace;font-size:0.8rem;max-height:400px;overflow-y:auto;white-space:pre-wrap;'></pre>"
 "  </div>"
 "</div>"
 "<script>"
@@ -397,8 +513,9 @@ static const char *INDEX_HTML =
 "  tabContents.forEach(tc=>tc.classList.remove('active'));"
 "  tab.classList.add('active');"
 "  document.getElementById('tab-'+tab.dataset.tab).classList.add('active');"
-"  if(tab.dataset.tab==='settings'){loadWifiSettings();loadSleepSettings();}"
+"  if(tab.dataset.tab==='settings'){loadWifiSettings();loadSleepSettings();loadLogLevel();loadVerboseLogs();loadComponentLogs();}"
 "  if(tab.dataset.tab==='ota'){loadOtaStatus();}"
+"  if(tab.dataset.tab==='monitoring'){updateLogs();}"
 "};});"
 "function togglePassword(fieldId){"
 "  const field = document.getElementById(fieldId);"
@@ -430,6 +547,15 @@ static const char *INDEX_HTML =
 "    document.getElementById('player-status').textContent=t;"
 "  }).catch(e=>{console.log('Error sending command:',e);});"
 "}"
+"function setSnifferState(state){"
+"  fetch('/player_cmd?cmd=set_sniffer&track='+state).then(r=>r.text()).then(t=>{"
+"    document.getElementById('player-status').textContent=t;"
+"  }).catch(e=>{console.log('Error setting sniffer state:',e);});"
+"}"
+"document.addEventListener('DOMContentLoaded', function(){" 
+"  var sn = document.getElementById('sniffer-enabled');" 
+"  if (sn) sn.addEventListener('change', function(e){ setSnifferState(e.target.checked?1:0); });" 
+"});" 
 "function updatePlayerStatus(){"
 "  fetch('/player_status').then(r=>r.json()).then(s=>{"
 "    const progress = document.getElementById('progress-bar');"
@@ -457,11 +583,20 @@ static const char *INDEX_HTML =
 "    }"
 "    "
 "    if (status) {"
-"      status.textContent = 'Трек ' + (s.current_track + 1) + '/' + s.playlist_size + ' ' + (s.is_paused ? '(пауза)' : '(играет)');"
-"    }"
+"      status.textContent = 'Трек ' + (s.current_track + 1) + '/' + s.playlist_size + ' ' + (s.is_paused ? '(пауза)' : '(відтворюється)') + ' Режим: ' + s.mode;" 
+"    }" 
+"    try { var sn = document.getElementById('sniffer-enabled'); if (sn) sn.checked = !!s.sniffer_enabled; } catch(e){}" 
 "  }).catch(e=>{console.log('Error updating status:',e);});"
 "}"
 "setInterval(updatePlayerStatus, 1000);"
+"function updateLogs(){"
+"  fetch('/logs').then(r=>r.text()).then(t=>{"
+"    const logOutput = document.getElementById('log-output');"
+"    logOutput.textContent=t;"
+"    logOutput.scrollTop = logOutput.scrollHeight;"
+"  }).catch(e=>{console.log('Error loading logs:',e);});"
+"}"
+"setInterval(updateLogs, 2000);"
 "document.getElementById('progress-bar').oninput = function() {"
 "  fetch('/player_cmd?cmd=set_pos&pos=' + (this.value * 3000)).catch(e=>{console.log('Error seeking:',e);});"
 "};"
@@ -536,6 +671,11 @@ static const char *INDEX_HTML =
 "    document.getElementById('sleep-status').textContent = 'Помилка завантаження: ' + e.message;"
 "  });"
 "}"
+"function loadLogLevel(){"
+"  fetch('/log_level').then(r=>r.text()).then(l=>{"
+"    document.getElementById('log-level').value = l;"
+"  }).catch(e=>{console.log('Error loading log level:',e);});"
+"}"
 "function loadOtaStatus(){"
 "  fetch('/ota_status').then(r=>r.json()).then(s=>{"
 "    document.getElementById('progress-bar').value = s.total > 0 ? (s.written * 100 / s.total) : 0;"
@@ -577,7 +717,57 @@ static const char *INDEX_HTML =
 "    document.getElementById('sleep-status').textContent = 'Помилка: ' + e.message;"
 "  });"
 "}"
-"</script></body></html>";
+"function saveLogLevel(){"
+"  const level = document.getElementById('log-level').value;"
+"  fetch('/log_level', {method:'POST', body:level}).then(r=>r.text()).then(t=>{"
+"    document.getElementById('sleep-status').textContent = 'Рівень логів збережено';"
+"  }).catch(e=>{console.log('Error saving log level:',e);});"
+"}"
+"function loadVerboseLogs(){"
+"  fetch('/verbose_logs').then(r=>r.text()).then(v=>{"
+"    document.getElementById('verbose-logs').checked = (v == '1');"
+"  }).catch(e=>{console.log('Error loading verbose logs:',e);});"
+"}"
+"function saveVerboseLogs(){"
+"  const enable = document.getElementById('verbose-logs').checked ? '1' : '0';"
+"  fetch('/verbose_logs', {method:'POST', body:enable}).then(r=>r.text()).then(t=>{"
+"    document.getElementById('sleep-status').textContent = 'Налаштування логів збережено';"
+"  }).catch(e=>{console.log('Error saving verbose logs:',e);});"
+"}"
+"function loadComponentLogs(){"
+"  fetch('/component_logs').then(r=>r.json()).then(c=>{"
+"    document.getElementById('player-logs').checked = c.player == 1;"
+"    document.getElementById('wifi-can-sniffer-logs').checked = c.wifi_can_sniffer == 1;"
+"    document.getElementById('web-ota-logs').checked = c.web_ota == 1;"
+"    document.getElementById('uart-ota-logs').checked = c.uart_ota == 1;"
+"    document.getElementById('elm327-logs').checked = c.elm327 == 1;"
+"    document.getElementById('sleep-status').textContent = 'Налаштування логів компонентів завантажено';"
+"  }).catch(e=>{document.getElementById('sleep-status').textContent = 'Помилка завантаження логів компонентів'; console.log('Error loading component logs:',e);});"
+"}"
+"function saveComponentLogs(){"
+"  const data = {"
+"    player: document.getElementById('player-logs').checked ? 1 : 0,"
+"    wifi_can_sniffer: document.getElementById('wifi-can-sniffer-logs').checked ? 1 : 0,"
+"    web_ota: document.getElementById('web-ota-logs').checked ? 1 : 0,"
+"    uart_ota: document.getElementById('uart-ota-logs').checked ? 1 : 0,"
+"    elm327: document.getElementById('elm327-logs').checked ? 1 : 0"
+"  };"
+"  const body = data.player + ' ' + data.wifi_can_sniffer + ' ' + data.web_ota + ' ' + data.uart_ota + ' ' + data.elm327;"
+"  fetch('/component_logs', {method:'POST', body:body}).then(r=>r.text()).then(t=>{"
+"    document.getElementById('sleep-status').textContent = 'Налаштування логів компонентів збережено';"
+"  }).catch(e=>{console.log('Error saving component logs:',e);});"
+"}"
+"function restartDevice(){"
+"  if (confirm('Ви впевнені, що хочете перезавантажити пристрій?')) {"
+"    fetch('/restart', {method:'POST'}).then(r=>r.text()).then(t=>{"
+"      alert('Пристрій перезавантажується...');"
+"    }).catch(e=>{console.log('Error restarting:',e);});"
+"  }"
+"}"
+"window.onload = function() { loadComponentLogs(); };"
+"</script>"
+"<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>ESP32 Music Player — web control • by your device</footer>"
+"</div></div></body></html>";
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
@@ -1358,6 +1548,163 @@ static esp_err_t upload_to_storage_handler(httpd_req_t *req)
 
 
 
+static esp_err_t logs_get_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    // Send the log buffer
+    char *response = malloc(LOG_BUFFER_SIZE + 1);
+    if (!response) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory error");
+        return ESP_FAIL;
+    }
+    int pos = log_write_pos;
+    for(int i = 0; i < LOG_BUFFER_SIZE; i++) {
+        response[i] = log_buffer[pos];
+        pos = (pos + 1) % LOG_BUFFER_SIZE;
+    }
+    response[LOG_BUFFER_SIZE] = '\0';
+    httpd_resp_send(req, response, strlen(response));
+    free(response);
+    return ESP_OK;
+}
+
+
+
+static esp_err_t log_level_get_handler(httpd_req_t *req)
+{
+    esp_log_level_t level = esp_log_level_get("*");
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%d", level);
+    httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t log_level_post_handler(httpd_req_t *req)
+{
+    char buf[10];
+    int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
+    if (ret <= 0) return ESP_FAIL;
+    buf[ret] = '\0';
+    int level = atoi(buf);
+    if (level >= ESP_LOG_NONE && level <= ESP_LOG_VERBOSE) {
+        esp_log_level_set("*", level);
+        // save to NVS
+        nvs_handle_t nvs_handle;
+        if (nvs_open("audio_player", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+            nvs_set_u8(nvs_handle, "log_level", level);
+            nvs_commit(nvs_handle);
+            nvs_close(nvs_handle);
+        }
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+static esp_err_t verbose_logs_get_handler(httpd_req_t *req)
+{
+    char buf[10];
+    snprintf(buf, sizeof(buf), "%d", g_verbose_logs ? 1 : 0);
+    httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t verbose_logs_post_handler(httpd_req_t *req)
+{
+    char buf[10];
+    int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
+    if (ret <= 0) return ESP_FAIL;
+    buf[ret] = '\0';
+    int enable = atoi(buf);
+    g_verbose_logs = (enable != 0);
+    // save to NVS
+    nvs_handle_t nvs_handle;
+    if (nvs_open("audio_player", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+        nvs_set_u8(nvs_handle, "verbose_logs", g_verbose_logs ? 1 : 0);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+static esp_err_t restart_handler(httpd_req_t *req)
+{
+    httpd_resp_sendstr(req, "Restarting device...");
+    vTaskDelay(pdMS_TO_TICKS(100)); // Give time to send response
+    esp_restart();
+    return ESP_OK; // Never reached
+}
+
+static esp_err_t component_logs_get_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "Component logs GET handler called");
+    char buf[256];
+    snprintf(buf, sizeof(buf), "{\"player\":%d,\"wifi_can_sniffer\":%d,\"web_ota\":%d,\"uart_ota\":%d,\"elm327\":%d}",
+             g_player_logs ? 1 : 0,
+             g_wifi_can_sniffer_logs ? 1 : 0,
+             g_web_ota_logs ? 1 : 0,
+             g_uart_ota_logs ? 1 : 0,
+             g_elm327_logs ? 1 : 0);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, strlen(buf));
+    return ESP_OK;
+}
+
+static esp_err_t component_logs_post_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "Component logs POST handler called");
+    char buf[256];
+    int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
+    if (ret <= 0) {
+        ESP_LOGE(TAG, "httpd_req_recv failed: %d", ret);
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+    ESP_LOGI(TAG, "Received component logs buf: %s", buf);
+    // Parse plain text
+    int player, wifi, web, uart, elm327;
+    if (sscanf(buf, "%d %d %d %d %d", &player, &wifi, &web, &uart, &elm327) != 5) {
+        ESP_LOGE(TAG, "Failed to parse component logs");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Parsed component logs: player=%d, wifi=%d, web=%d, uart=%d, elm=%d", player, wifi, web, uart, elm327);
+    g_player_logs = (player != 0);
+    g_wifi_can_sniffer_logs = (wifi != 0);
+    g_web_ota_logs = (web != 0);
+    g_uart_ota_logs = (uart != 0);
+    g_elm327_logs = (elm327 != 0);
+    // save to NVS
+    ESP_LOGI(TAG, "Saving component logs to NVS: player=%d, wifi=%d, web=%d, uart=%d, elm=%d", g_player_logs, g_wifi_can_sniffer_logs, g_web_ota_logs, g_uart_ota_logs, g_elm327_logs);
+    nvs_handle_t nvs_handle;
+    if (nvs_open("audio_player", NVS_READWRITE, &nvs_handle) == ESP_OK) {
+        ESP_LOGI(TAG, "NVS opened for component logs save");
+        esp_err_t err;
+        err = nvs_set_u8(nvs_handle, "player_logs", g_player_logs ? 1 : 0);
+        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 player_logs failed: %s", esp_err_to_name(err));
+        err = nvs_set_u8(nvs_handle, "wifi_logs", g_wifi_can_sniffer_logs ? 1 : 0);
+        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 wifi_logs failed: %s", esp_err_to_name(err));
+        err = nvs_set_u8(nvs_handle, "web_ota_logs", g_web_ota_logs ? 1 : 0);
+        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 web_ota_logs failed: %s", esp_err_to_name(err));
+        err = nvs_set_u8(nvs_handle, "uart_ota_logs", g_uart_ota_logs ? 1 : 0);
+        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 uart_ota_logs failed: %s", esp_err_to_name(err));
+        err = nvs_set_u8(nvs_handle, "elm327_logs", g_elm327_logs ? 1 : 0);
+        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 elm327_logs failed: %s", esp_err_to_name(err));
+        if (nvs_commit(nvs_handle) == ESP_OK) {
+            ESP_LOGI(TAG, "NVS committed for component logs");
+        } else {
+            ESP_LOGE(TAG, "NVS commit failed for component logs");
+        }
+        nvs_close(nvs_handle);
+    } else {
+        ESP_LOGE(TAG, "Failed to open NVS for component logs save");
+    }
+    httpd_resp_sendstr(req, "OK");
+    return ESP_OK;
+}
+
+
+
 esp_err_t web_ota_start(void)
 {
     if (s_server) {
@@ -1366,7 +1713,7 @@ esp_err_t web_ota_start(void)
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
-    config.max_uri_handlers = 20;  // Increased limit for ESP32-S3
+    config.max_uri_handlers = 30;  // Unlimited
     config.uri_match_fn = httpd_uri_match_wildcard;
 
     esp_err_t err = httpd_start(&s_server, &config);
@@ -1374,6 +1721,22 @@ esp_err_t web_ota_start(void)
         ESP_LOGE(TAG, "Failed to start server: %s", esp_err_to_name(err));
         return err;
     }
+
+    // Load log level from NVS
+    esp_log_level_t level = ESP_LOG_INFO;
+    nvs_handle_t nvs_handle;
+    if (nvs_open("audio_player", NVS_READONLY, &nvs_handle) == ESP_OK) {
+        uint8_t val;
+        if (nvs_get_u8(nvs_handle, "log_level", &val) == ESP_OK) {
+            level = val;
+        }
+        nvs_close(nvs_handle);
+    }
+    esp_log_level_set("*", level);
+
+    // Set up log capture
+    original_vprintf = esp_log_set_vprintf(log_vprintf);
+    ESP_LOGI(TAG, "Log capture enabled");
 
     httpd_uri_t root = {
         .uri = "/",
@@ -1465,6 +1828,62 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t logs = {
+        .uri = "/logs",
+        .method = HTTP_GET,
+        .handler = logs_get_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t log_level_get = {
+        .uri = "/log_level",
+        .method = HTTP_GET,
+        .handler = log_level_get_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t log_level_post = {
+        .uri = "/log_level",
+        .method = HTTP_POST,
+        .handler = log_level_post_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t verbose_logs_get = {
+        .uri = "/verbose_logs",
+        .method = HTTP_GET,
+        .handler = verbose_logs_get_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t verbose_logs_post = {
+        .uri = "/verbose_logs",
+        .method = HTTP_POST,
+        .handler = verbose_logs_post_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t restart = {
+        .uri = "/restart",
+        .method = HTTP_POST,
+        .handler = restart_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t component_logs_get = {
+        .uri = "/component_logs",
+        .method = HTTP_GET,
+        .handler = component_logs_get_handler,
+        .user_ctx = NULL,
+    };
+
+    httpd_uri_t component_logs_post = {
+        .uri = "/component_logs",
+        .method = HTTP_POST,
+        .handler = component_logs_post_handler,
+        .user_ctx = NULL,
+    };
+
     httpd_register_uri_handler(s_server, &root);
     httpd_register_uri_handler(s_server, &upload);
     httpd_register_uri_handler(s_server, &upload_storage);
@@ -1478,9 +1897,17 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);
     httpd_register_uri_handler(s_server, &wifi_settings_post);
+    httpd_register_uri_handler(s_server, &logs);
+    httpd_register_uri_handler(s_server, &log_level_get);
+    httpd_register_uri_handler(s_server, &log_level_post);
+    httpd_register_uri_handler(s_server, &verbose_logs_get);
+    httpd_register_uri_handler(s_server, &verbose_logs_post);
+    httpd_register_uri_handler(s_server, &restart);
+    httpd_register_uri_handler(s_server, &component_logs_post);
+    httpd_register_uri_handler(s_server, &component_logs_get);
 
     ESP_LOGI(TAG, "Web OTA server started on port %d", config.server_port);
-    ESP_LOGI(TAG, "Registered URI handlers: root, upload, upload_storage, upload_slave, status, version, playlist, player_cmd, player_status, sleep_settings_get, sleep_settings_post, wifi_settings_get, wifi_settings_post");
+    ESP_LOGI(TAG, "Registered URI handlers: root, upload, upload_storage, upload_slave, status, version, playlist, player_cmd, player_status, sleep_settings_get, sleep_settings_post, wifi_settings_get, wifi_settings_post, logs, log_level_get, log_level_post, verbose_logs_get, verbose_logs_post, restart, component_logs_get, component_logs_post");
     return ESP_OK;
 }
 

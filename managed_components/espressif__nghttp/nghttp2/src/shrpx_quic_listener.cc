@@ -39,6 +39,7 @@ void readcb(struct ev_loop *loop, ev_io *w, int revent) {
 QUICListener::QUICListener(const UpstreamAddr *faddr, Worker *worker)
   : faddr_{faddr}, worker_{worker} {
   ev_io_init(&rev_, readcb, faddr_->fd, EV_READ);
+  ev_set_priority(&rev_, EV_MAXPRI);
   rev_.data = this;
   ev_io_start(worker_->get_loop(), &rev_);
 }
@@ -49,24 +50,30 @@ QUICListener::~QUICListener() {
 }
 
 void QUICListener::on_read() {
-  sockaddr_union su;
+  Address remote_addr;
   std::array<uint8_t, 64_k> buf;
   size_t pktcnt = 0;
-  iovec msg_iov{buf.data(), buf.size()};
-
-  msghdr msg{};
-  msg.msg_name = &su;
-  msg.msg_iov = &msg_iov;
-  msg.msg_iovlen = 1;
+  iovec msg_iov{
+    .iov_base = buf.data(),
+    .iov_len = buf.size(),
+  };
 
   uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(in6_pktinfo)) +
                    CMSG_SPACE(sizeof(int))];
-  msg.msg_control = msg_ctrl;
+
+  sockaddr_storage ss;
+
+  msghdr msg{
+    .msg_name = &ss,
+    .msg_iov = &msg_iov,
+    .msg_iovlen = 1,
+    .msg_control = msg_ctrl,
+  };
 
   auto quic_conn_handler = worker_->get_quic_connection_handler();
 
-  for (; pktcnt < 10;) {
-    msg.msg_namelen = sizeof(su);
+  for (; pktcnt < 64;) {
+    msg.msg_namelen = sizeof(ss);
     msg.msg_controllen = sizeof(msg_ctrl);
 
     auto nread = recvmsg(faddr_->fd, &msg, 0);
@@ -81,24 +88,25 @@ void QUICListener::on_read() {
       continue;
     }
 
-    if (util::quic_prohibited_port(util::get_port(&su))) {
+    remote_addr.set(reinterpret_cast<const sockaddr *>(&ss));
+
+    if (util::quic_prohibited_port(remote_addr.port())) {
       ++pktcnt;
 
       continue;
     }
 
-    Address local_addr{};
-    if (util::msghdr_get_local_addr(local_addr, &msg, su.storage.ss_family) !=
-        0) {
+    Address local_addr;
+    if (util::msghdr_get_local_addr(local_addr, &msg, ss.ss_family) != 0) {
       ++pktcnt;
 
       continue;
     }
 
-    util::set_port(local_addr, faddr_->port);
+    local_addr.port(faddr_->port);
 
     ngtcp2_pkt_info pi{
-      .ecn = util::msghdr_get_ecn(&msg, su.storage.ss_family),
+      .ecn = util::msghdr_get_ecn(&msg, ss.ss_family),
     };
 
     auto gso_size = util::msghdr_get_udp_gro(&msg);
@@ -106,17 +114,17 @@ void QUICListener::on_read() {
       gso_size = static_cast<size_t>(nread);
     }
 
-    auto data = std::span{std::begin(buf), static_cast<size_t>(nread)};
+    auto data = std::span{buf}.first(as_unsigned(nread));
 
     for (;;) {
       auto datalen = std::min(data.size(), gso_size);
 
       ++pktcnt;
 
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "QUIC received packet: local="
-                  << util::to_numeric_addr(&local_addr) << " remote="
-                  << util::to_numeric_addr(&su.sa, msg.msg_namelen)
+      if (log_enabled(INFO)) {
+        Log{INFO} << "QUIC received packet: local="
+                  << util::to_numeric_addr(&local_addr)
+                  << " remote=" << util::to_numeric_addr(&remote_addr)
                   << " ecn=" << log::hex << pi.ecn << log::dec << " " << datalen
                   << " bytes";
       }
@@ -126,12 +134,8 @@ void QUICListener::on_read() {
         break;
       }
 
-      Address remote_addr;
-      remote_addr.su = su;
-      remote_addr.len = msg.msg_namelen;
-
       quic_conn_handler->handle_packet(faddr_, remote_addr, local_addr, pi,
-                                       {std::begin(data), datalen});
+                                       data.first(datalen));
 
       data = data.subspan(datalen);
       if (data.empty()) {

@@ -16,8 +16,9 @@
     "--query-driver=/home/max/.espressif/tools/xtensa-esp-elf/esp-14.2.0_20241119/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc",
     "--compile-commands-dir=/home/max/Документи/mp3-player/pipeline_play_sdcard_music/build"
   ],
-  "idf.port": "/dev/ttyACM0",
+  "idf.port": "COM6",
   "idf.flashType": "UART",
   "CodeGPT.apiKey": "Claude Code",
-  "idf.portWin": "COM7"
+  "java.configuration.updateBuildConfiguration": "automatic",
+  "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.1/"
 }

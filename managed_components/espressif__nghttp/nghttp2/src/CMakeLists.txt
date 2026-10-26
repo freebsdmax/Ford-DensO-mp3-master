@@ -16,7 +16,9 @@ include_directories(
   ${LIBNGHTTP3_INCLUDE_DIRS}
   ${LIBNGTCP2_INCLUDE_DIRS}
   ${LIBNGTCP2_CRYPTO_QUICTLS_INCLUDE_DIRS}
+  ${LIBNGTCP2_CRYPTO_LIBRESSL_INCLUDE_DIRS}
   ${LIBNGTCP2_CRYPTO_WOLFSSL_INCLUDE_DIRS}
+  ${LIBNGTCP2_CRYPTO_OSSL_INCLUDE_DIRS}
   ${OPENSSL_INCLUDE_DIRS}
   ${WOLFSSL_INCLUDE_DIRS}
   ${LIBCARES_INCLUDE_DIRS}
@@ -36,7 +38,9 @@ link_libraries(
   ${LIBNGHTTP3_LIBRARIES}
   ${LIBNGTCP2_LIBRARIES}
   ${LIBNGTCP2_CRYPTO_QUICTLS_LIBRARIES}
+  ${LIBNGTCP2_CRYPTO_LIBRESSL_LIBRARIES}
   ${LIBNGTCP2_CRYPTO_WOLFSSL_LIBRARIES}
+  ${LIBNGTCP2_CRYPTO_OSSL_LIBRARIES}
   ${OPENSSL_LIBRARIES}
   ${WOLFSSL_LIBRARIES}
   ${LIBCARES_LIBRARIES}
@@ -52,6 +56,7 @@ if(ENABLE_APP)
   set(HELPER_OBJECTS
     util.cc
     http2.cc timegm.c app_helper.cc nghttp2_gzip.c
+    network.cc
   )
 
   # nghttp client
@@ -78,6 +83,7 @@ if(ENABLE_APP)
     http2.cc h2load.cc
     timegm.c
     tls.cc
+    network.cc
     h2load_http2_session.cc
     h2load_http1_session.cc
   )
@@ -85,7 +91,6 @@ if(ENABLE_APP)
     list(APPEND H2LOAD_SOURCES
       h2load_http3_session.cc
       h2load_quic.cc
-      quic.cc
     )
   endif()
 
@@ -94,6 +99,7 @@ if(ENABLE_APP)
     util.cc http2.cc timegm.c
     app_helper.cc
     tls.cc
+    network.cc
     shrpx_config.cc
     shrpx_accept_handler.cc
     shrpx_connection_handler.cc
@@ -125,7 +131,6 @@ if(ENABLE_APP)
     shrpx_api_downstream_connection.cc
     shrpx_health_monitor_downstream_connection.cc
     shrpx_null_downstream_connection.cc
-    shrpx_exec.cc
     shrpx_dns_resolver.cc
     shrpx_dual_dns_resolver.cc
     shrpx_dns_tracker.cc
@@ -147,7 +152,6 @@ if(ENABLE_APP)
      shrpx_quic_connection_handler.cc
      shrpx_http3_upstream.cc
      http3.cc
-     quic.cc
      siphash.cc
     )
   endif()
@@ -189,6 +193,8 @@ if(ENABLE_APP)
       memchunk_test.cc
       template_test.cc
       base64_test.cc
+      network_test.cc
+      allocator_test.cc
       ${CMAKE_SOURCE_DIR}/tests/munit/munit.c
     )
     if(ENABLE_HTTP3)
@@ -248,6 +254,8 @@ if(ENABLE_HPACK_TOOLS)
     comp_helper.c
     util.cc
     timegm.c
+    tls.cc
+    network.cc
   )
   add_executable(inflatehd ${inflatehd_SOURCES})
   add_executable(deflatehd ${deflatehd_SOURCES})

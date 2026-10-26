@@ -30,10 +30,10 @@
 #include <sys/types.h>
 #ifdef HAVE_SYS_SOCKET_H
 #  include <sys/socket.h>
-#endif // HAVE_SYS_SOCKET_H
+#endif // defined(HAVE_SYS_SOCKET_H)
 #ifdef HAVE_NETDB_H
 #  include <netdb.h>
-#endif // HAVE_NETDB_H
+#endif // defined(HAVE_NETDB_H)
 #include <sys/un.h>
 
 #include <vector>
@@ -42,6 +42,7 @@
 #include <memory>
 #include <chrono>
 #include <array>
+#include <span>
 
 #define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
@@ -49,23 +50,24 @@
 #ifdef ENABLE_HTTP3
 #  include <ngtcp2/ngtcp2.h>
 #  include <ngtcp2/ngtcp2_crypto.h>
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
 
 #include <ev.h>
 
 #include "ssl_compat.h"
 
+#if defined(ENABLE_HTTP3) && OPENSSL_3_5_0_API
+#  include <ngtcp2/ngtcp2_crypto_ossl.h>
+#endif // defined(ENABLE_HTTP3) && OPENSSL_3_5_0_API
+
 #ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
 #  include <wolfssl/options.h>
 #  include <wolfssl/openssl/ssl.h>
-#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#else // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 #  include <openssl/ssl.h>
-#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#endif // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 
 #include "http2.h"
-#ifdef ENABLE_HTTP3
-#  include "quic.h"
-#endif // ENABLE_HTTP3
 #include "memchunk.h"
 #include "template.h"
 
@@ -73,7 +75,7 @@ using namespace nghttp2;
 
 namespace h2load {
 
-constexpr auto BACKOFF_WRITE_BUFFER_THRES = 16_k;
+inline constexpr auto BACKOFF_WRITE_BUFFER_THRES = 16_k;
 
 class Session;
 struct Worker;
@@ -149,6 +151,14 @@ struct Config {
   // sni is the value sent in TLS SNI, overriding DNS name of the
   // remote host.
   std::string sni;
+  // Plot histogram.
+  bool histogram{};
+  // Path to TLS session file.
+  std::string tls_session_file;
+  // TLS session read from file.
+  SSL_SESSION *tls_session{};
+  // Path to file to write the measurement results.
+  std::string output_file;
 
   Config();
   ~Config();
@@ -195,24 +205,56 @@ struct ClientStat {
   std::chrono::steady_clock::time_point connect_time;
   // time to first byte (TTFB)
   std::chrono::steady_clock::time_point ttfb;
+
+  // The minimum RTT (QUIC)
+  std::chrono::nanoseconds min_rtt;
+  // The smoothed RTT (QUIC)
+  std::chrono::nanoseconds smoothed_rtt;
+  // The number of packets sent (QUIC)
+  uint64_t pkt_sent;
+  // The number of packets received (QUIC)
+  uint64_t pkt_recv;
+  // The number of packets declared lost (QUIC)
+  uint64_t pkt_lost;
 };
 
-struct SDStat {
-  // min, max, mean and sd (standard deviation)
-  double min, max, mean, sd;
+struct GROStat {
+  // The number of packets received in a single recvmsg (QUIC)
+  size_t num_pkts;
+};
+
+template <typename T> struct SDStat {
+  // min, max, median, p95, and p99
+  T min, max, median, p95, p99;
+  // mean and sd (standard deviation)
+  double mean, sd;
   // percentage of samples inside mean -/+ sd
   double within_sd;
+  // sampled data
+  std::vector<T> samples;
 };
 
 struct SDStats {
   // time for request
-  SDStat request;
+  SDStat<double> request;
   // time for connect
-  SDStat connect;
+  SDStat<double> connect;
   // time to first byte (TTFB)
-  SDStat ttfb;
+  SDStat<double> ttfb;
   // request per second for each client
-  SDStat rps;
+  SDStat<double> rps;
+  // minimum RTT (QUIC)
+  SDStat<double> min_rtt;
+  // smoothed RTT (QUIC)
+  SDStat<double> smoothed_rtt;
+  // the number of packets sent (QUIC)
+  SDStat<uint64_t> pkt_sent;
+  // the number of packets received (QUIC)
+  SDStat<uint64_t> pkt_recv;
+  // the number of packets declared lost (QUIC)
+  SDStat<uint64_t> pkt_lost;
+  // the number of packets received in a single recvmsg call (QUIC)
+  SDStat<uint64_t> gro_pkts;
 };
 
 struct Stats {
@@ -254,6 +296,8 @@ struct Stats {
   std::vector<RequestStat> req_stats;
   // The statistics per client
   std::vector<ClientStat> client_stats;
+  // The statistics about GRO, sampled across all clients.
+  std::vector<GROStat> gro_stats;
   // The number of UDP datagrams received.
   size_t udp_dgram_recv;
   // The number of UDP datagrams sent.
@@ -287,6 +331,7 @@ struct Worker {
   Stats stats;
   Sampling request_times_smp;
   Sampling client_smp;
+  Sampling gro_smp;
   struct ev_loop *loop;
   SSL_CTX *ssl_ctx;
   Config *config;
@@ -294,6 +339,8 @@ struct Worker {
   uint32_t id;
   bool tls_info_report_done;
   bool app_info_report_done;
+  bool tls_session_store_done{};
+  SSL_SESSION *tls_session{};
   size_t nconns_made;
   // number of clients this worker handles
   size_t nclients;
@@ -311,7 +358,7 @@ struct Worker {
   // worker
   Phase current_phase;
   // We need to keep track of the clients in order to stop them when needed
-  std::vector<Client *> clients;
+  std::unordered_map<uint32_t, Client *> clients;
   // This is only active when there is not a bounded number of requests
   // specified
   ev_timer duration_watcher;
@@ -324,12 +371,14 @@ struct Worker {
   void run();
   void sample_req_stat(RequestStat *req_stat);
   void sample_client_stat(ClientStat *cstat);
+  void sample_gro_stat(const GROStat &gro_stat);
   void report_progress();
   void report_rate_progress();
   // This function calls the destructors of all the clients.
   void stop_all_clients();
   // This function frees a client from the list of clients for this Worker.
   void free_client(Client *);
+  void write_tls_session(const std::string &path);
 };
 
 struct Stream {
@@ -340,7 +389,7 @@ struct Stream {
 
 struct Client {
   DefaultMemchunks wb;
-  std::unordered_map<int32_t, Stream> streams;
+  std::unordered_map<int64_t, Stream> streams;
   ClientStat cstat;
   std::unique_ptr<Session> session;
   ev_io wev;
@@ -354,23 +403,24 @@ struct Client {
     ev_timer pkt_timer;
     ngtcp2_conn *conn;
     ngtcp2_ccerr last_error;
+#  if OPENSSL_3_5_0_API
+    ngtcp2_crypto_ossl_ctx *ossl_ctx;
+#  endif // OPENSSL_3_5_0_API
     bool close_requested;
     FILE *qlog_file;
 
     struct {
       bool send_blocked;
-      size_t num_blocked;
-      size_t num_blocked_sent;
       struct {
         Address remote_addr;
-        const uint8_t *data;
-        size_t datalen;
+        std::span<const uint8_t> data;
         size_t gso_size;
-      } blocked[2];
+      } blocked;
       std::unique_ptr<uint8_t[]> data;
+      bool no_gso;
     } tx;
   } quic;
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
   ev_timer request_timeout_watcher;
   addrinfo *next_addr;
   // Address for the current address.  When try_new_connection() is
@@ -439,9 +489,10 @@ struct Client {
   void process_abandoned_streams();
   void report_tls_info();
   void report_app_info();
-  void terminate_session();
+  int terminate_session();
   // Asks client to create new connection, instead of just fail.
   void try_new_connection();
+  uint32_t get_id() const;
 
   int do_read();
   int do_write();
@@ -454,24 +505,24 @@ struct Client {
   int read_tls();
   int write_tls();
 
-  int on_read(const uint8_t *data, size_t len);
+  int on_read(std::span<const uint8_t> data);
   int on_write();
 
   int connection_made();
 
-  void on_request(int32_t stream_id);
-  void on_header(int32_t stream_id, const uint8_t *name, size_t namelen,
-                 const uint8_t *value, size_t valuelen);
-  void on_status_code(int32_t stream_id, uint16_t status);
+  void on_request(int64_t stream_id);
+  void on_header(int64_t stream_id, std::span<const uint8_t> name,
+                 std::span<const uint8_t> value);
+  void on_status_code(int64_t stream_id, uint16_t status);
   // |success| == true means that the request/response was exchanged
   // |successfully, but it does not mean response carried successful
   // |HTTP status code.
-  void on_stream_close(int32_t stream_id, bool success, bool final = false);
+  void on_stream_close(int64_t stream_id, bool success, bool final = false);
   // Returns RequestStat for |stream_id|.  This function must be
   // called after on_request(stream_id), and before
   // on_stream_close(stream_id, ...).  Otherwise, this will return
   // nullptr.
-  RequestStat *get_req_stat(int32_t stream_id);
+  RequestStat *get_req_stat(int64_t stream_id);
 
   void record_request_time(RequestStat *req_stat);
   void record_connect_start_time();
@@ -490,16 +541,21 @@ struct Client {
   void quic_free();
   int read_quic();
   int write_quic();
-  int write_udp(const sockaddr *addr, socklen_t addrlen, const uint8_t *data,
-                size_t datalen, size_t gso_size);
-  void on_send_blocked(const ngtcp2_addr &remote_addr, const uint8_t *data,
-                       size_t datalen, size_t gso_size);
+  ngtcp2_ssize write_quic_pkt(ngtcp2_path *path, ngtcp2_pkt_info *pi,
+                              std::span<uint8_t> dest, ngtcp2_tstamp ts);
+  std::span<const uint8_t> write_udp(const sockaddr *addr, socklen_t addrlen,
+                                     std::span<const uint8_t> data,
+                                     size_t gso_size);
+  void write_udp_or_blocked(const ngtcp2_path &path,
+                            std::span<const uint8_t> data, size_t gso_size);
+  void on_send_blocked(const ngtcp2_addr &remote_addr,
+                       std::span<const uint8_t> data, size_t gso_size);
   int send_blocked_packet();
   void quic_close_connection();
 
   int quic_handshake_completed();
   int quic_recv_stream_data(uint32_t flags, int64_t stream_id,
-                            const uint8_t *data, size_t datalen);
+                            std::span<const uint8_t> data);
   int quic_acked_stream_data_offset(int64_t stream_id, size_t datalen);
   int quic_stream_close(int64_t stream_id, uint64_t app_error_code);
   int quic_stream_reset(int64_t stream_id, uint64_t app_error_code);
@@ -507,15 +563,13 @@ struct Client {
   int quic_extend_max_local_streams();
   int quic_extend_max_stream_data(int64_t stream_id);
 
-  int quic_write_client_handshake(ngtcp2_encryption_level level,
-                                  const uint8_t *data, size_t datalen);
   int quic_pkt_timeout();
   void quic_restart_pkt_timer();
   void quic_write_qlog(const void *data, size_t datalen);
   int quic_make_http3_session();
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
 };
 
 } // namespace h2load
 
-#endif // H2LOAD_H
+#endif // !defined(H2LOAD_H)

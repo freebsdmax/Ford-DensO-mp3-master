@@ -74,6 +74,13 @@ typedef struct {
 esp_err_t wifi_can_sniffer_init(const wifi_can_sniffer_config_t *config);
 
 /**
+ * @brief Обновить broadcast адрес на основе текущего IP
+ * 
+ * @return ESP_OK если успешно
+ */
+esp_err_t wifi_can_sniffer_update_broadcast(void);
+
+/**
  * @brief Отправить CAN-пакет через Wi-Fi
  * 
  * @param frame Указатель на CAN-пакет

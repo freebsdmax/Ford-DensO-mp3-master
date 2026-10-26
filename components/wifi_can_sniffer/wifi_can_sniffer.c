@@ -1,5 +1,7 @@
 #include "wifi_can_sniffer.h"
 #include "esp_wifi.h"
+#include "esp_netif.h"
+#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "lwip/sockets.h"
@@ -7,6 +9,11 @@
 #include <string.h>
 
 static const char *TAG = "WiFiCanSniffer";
+
+// Глобальний прапор для детальних логів (false - приховати зайві логи)
+extern bool g_verbose_logs;
+// Прапор для логів компонента
+extern bool g_wifi_can_sniffer_logs;
 
 // Хелпер для розворачивання байтів (little-endian ↔ big-endian)
 static inline uint32_t swap_bytes_uint32(uint32_t val)
@@ -23,6 +30,8 @@ static struct sockaddr_in g_pc_addr = {0};
 static bool g_pc_connected = false;
 static TaskHandle_t g_wifi_task_handle = NULL;
 static wifi_can_sniffer_config_t g_config = {0};
+// Флаг, показывающий, что сніфер був іниціалізований (включений) через wifi_can_sniffer_init()
+static bool g_enabled = false;
 
 // Буфер для накопления пакетов перед отправкой
 static uint8_t g_udp_out_buffer[UDP_BUFFER_SIZE] = {0};
@@ -36,6 +45,8 @@ static uint32_t g_stat_time = 0;
 
 // Forward declaration
 static void flush_udp_buffer(void);
+static void start_sniffer_now(void);
+static bool g_started = false;
 
 /**
  * @brief Event handler для Wi-Fi
@@ -52,6 +63,13 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_AP_STAIPASSIGNED) {
         ip_event_ap_staipassigned_t *ev = (ip_event_ap_staipassigned_t *)event_data;
         ESP_LOGI(TAG, "IP assigned: " IPSTR, IP2STR(&ev->ip));
+        // For AP mode, set broadcast to 192.168.4.255
+        g_pc_addr.sin_family = AF_INET;
+        g_pc_addr.sin_port = htons(g_config.udp_port);
+        g_pc_addr.sin_addr.s_addr = inet_addr("192.168.4.255");
+        ESP_LOGI(TAG, "Broadcast address set to: 192.168.4.255:%d", ntohs(g_pc_addr.sin_port));
+        // Start sniffer now if not already started and sniffer was explicitly enabled
+        if (g_enabled) start_sniffer_now();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
         ESP_LOGI(TAG, "STA connected to AP");
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -59,7 +77,20 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ev = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "STA got IP: " IPSTR, IP2STR(&ev->ip_info.ip));
+        ESP_LOGI(TAG, "STA got IP: " IPSTR ", netmask: " IPSTR ", gw: " IPSTR,
+                 IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.netmask), IP2STR(&ev->ip_info.gw));
+
+        // Use first three octets + .255 as broadcast address (force x.y.z.255)
+        uint32_t ip_net = ev->ip_info.ip.addr; // network byte order
+        uint32_t ip_host = ntohl(ip_net);
+        uint32_t bcast_host = (ip_host & 0xFFFFFF00u) | 0x000000FFu;
+        g_pc_addr.sin_family = AF_INET;
+        g_pc_addr.sin_port = htons(g_config.udp_port);
+        g_pc_addr.sin_addr.s_addr = htonl(bcast_host);
+
+        ESP_LOGI(TAG, "Broadcast address forced to .255: %s:%d", inet_ntoa(g_pc_addr.sin_addr), ntohs(g_pc_addr.sin_port));
+        // Start sniffer now if not already started and sniffer was explicitly enabled
+        if (g_enabled) start_sniffer_now();
     }
 }
 
@@ -68,21 +99,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
  */
 static esp_err_t wifi_init_ap(const char *ssid, const char *password)
 {
-    ESP_LOGI(TAG, "🔧 Initializing Wi-Fi AP...");
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "🔧 Initializing Wi-Fi AP...");
     
-    esp_err_t ret = esp_netif_init();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "❌ esp_netif_init failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "✅ Netif initialized (or already was)");
-
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "❌ esp_event_loop_create_default failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "✅ Event loop created (or already was)");
+    // NOTE: TCP/IP stack and default event loop must be initialized by the application
+    // (call esp_netif_init() and esp_event_loop_create_default() once in app_main).
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "ℹ️ Assuming netif and event loop already initialized by app");
 
     // Спробувати створити AP netif, але якщо вже існує - використати існуючий
     esp_netif_t *ap_netif = NULL;
@@ -96,9 +117,9 @@ static esp_err_t wifi_init_ap(const char *ssid, const char *password)
             ESP_LOGE(TAG, "❌ Failed to create AP netif");
             return ESP_FAIL;
         }
-        ESP_LOGI(TAG, "✅ AP netif created");
+        if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "✅ AP netif created");
     } else {
-        ESP_LOGI(TAG, "ℹ️ Using existing AP netif");
+        if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "ℹ️ Using existing AP netif");
     }
     
     // Настройка IP адресов для AP
@@ -113,15 +134,27 @@ static esp_err_t wifi_init_ap(const char *ssid, const char *password)
     
     ESP_LOGI(TAG, "AP IP: 192.168.4.1");
 
+    // Ensure sniffer uses AP broadcast (192.168.4.255) immediately
+    g_pc_addr.sin_family = AF_INET;
+    g_pc_addr.sin_port = htons(g_config.udp_port);
+    g_pc_addr.sin_addr.s_addr = inet_addr("192.168.4.255");
+    g_pc_connected = true;
+    ESP_LOGI(TAG, "Broadcast address set to: 192.168.4.255:%d", ntohs(g_pc_addr.sin_port));
+
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t ret;
     ret = esp_wifi_init(&cfg);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) return ret;
 
-    ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret;
+    // РЕЄСТРАЦІЯ ОБРОБНИКІВ ПОДІЙ — робимо це тільки якщо сніфер був явнo ініціалізований
+    // (щоб виклики wifi_can_switch_to_sta/ap не запускали сніфер автоматично)
+    if (g_enabled) {
+        ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret;
 
-    ret = esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &wifi_event_handler, NULL);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret;
+        ret = esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, &wifi_event_handler, NULL);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret;
+    }
 
     wifi_config_t wifi_config = {
         .ap = {
@@ -146,9 +179,14 @@ static esp_err_t wifi_init_ap(const char *ssid, const char *password)
     ret = esp_wifi_start();
     if (ret != ESP_OK) return ret;
 
-    ESP_LOGI(TAG, "Wi-Fi AP initialized");
-    ESP_LOGI(TAG, "   SSID: %s", ssid);
-    ESP_LOGI(TAG, "   Password: %s", password);
+    if (g_verbose_logs) {
+        ESP_LOGI(TAG, "Wi-Fi AP initialized");
+        ESP_LOGI(TAG, "   SSID: %s", ssid);
+        ESP_LOGI(TAG, "   Password: %s", password);
+    }
+
+    // AP is up — start sniffer only if it was explicitly enabled
+    if (g_enabled) start_sniffer_now();
 
     return ESP_OK;
 }
@@ -159,19 +197,17 @@ static esp_err_t wifi_init_ap(const char *ssid, const char *password)
 esp_err_t wifi_can_switch_to_sta(const char *ssid, const char *password)
 {
     if (!ssid) return ESP_ERR_INVALID_ARG;
-    ESP_LOGI(TAG, "🔧 Switching Wi-Fi to STA mode...");
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "🔧 Switching Wi-Fi to STA mode...");
 
     esp_err_t ret;
-    // Ініціалізація netif та подій (якщо ще не ініціалізовано)
-    ret = esp_netif_init();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) return ret;
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) return ret;
+    // Initialize netif and events (if not already initialized)
+    // TCP/IP stack and default event loop should already be initialized by the application
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "ℹ️ Assuming netif and event loop already initialized by app");
 
     // Створити STA netif якщо відсутній
     esp_netif_t *sta_netif = esp_netif_create_default_wifi_sta();
     if (!sta_netif) {
-        ESP_LOGI(TAG, "ℹ️ STA netif вже існує, використовуємо існуючий");
+        if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "ℹ️ STA netif вже існує, використовуємо існуючий");
         // Отримуємо існуючий STA netif
         sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
         if (!sta_netif) {
@@ -187,13 +223,16 @@ esp_err_t wifi_can_switch_to_sta(const char *ssid, const char *password)
         ESP_LOGE(TAG, "❌ esp_wifi_init failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "✅ Wi-Fi initialized (or already was)");
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "✅ Wi-Fi initialized (or already was)");
 
     // Реєстрація обробників подій
-    ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret; // ESP_ERR_INVALID_ARG means already registered
-    ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret;
+    // Register event handlers only if sniffer was enabled via init
+    if (g_enabled) {
+        ret = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret; // ESP_ERR_INVALID_ARG means already registered
+        ret = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_ARG) return ret;
+    }
 
     // Перейти у режим STA
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -224,7 +263,7 @@ esp_err_t wifi_can_switch_to_sta(const char *ssid, const char *password)
     ret = esp_wifi_connect();
     if (ret != ESP_OK) return ret;
 
-    ESP_LOGI(TAG, "📶 STA connecting to SSID: %s", ssid);
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "📶 STA connecting to SSID: %s", ssid);
     return ESP_OK;
 }
 
@@ -234,12 +273,12 @@ esp_err_t wifi_can_switch_to_sta(const char *ssid, const char *password)
 esp_err_t wifi_can_switch_to_ap(const char *ssid, const char *password)
 {
     if (!ssid || !password) return ESP_ERR_INVALID_ARG;
-    ESP_LOGI(TAG, "🔧 Switching Wi-Fi to AP mode...");
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "🔧 Switching Wi-Fi to AP mode...");
 
     // Повністю деініціалізувати Wi-Fi перед переключенням
     esp_wifi_stop();
     esp_wifi_deinit();
-    ESP_LOGI(TAG, "🔧 Wi-Fi deinitialized");
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "🔧 Wi-Fi deinitialized");
 
     // Небольшая задержка для полной очистки
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -247,7 +286,7 @@ esp_err_t wifi_can_switch_to_ap(const char *ssid, const char *password)
     // Перейти в AP
     esp_err_t ret = wifi_init_ap(ssid, password);
     if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "📶 AP started: %s", ssid);
+        if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "📶 AP started: %s", ssid);
     } else {
         ESP_LOGE(TAG, "❌ Failed to start AP: %s", esp_err_to_name(ret));
     }
@@ -375,8 +414,20 @@ static void wifi_can_sniffer_task(void *pvParameters)
  */
 static void flush_udp_buffer(void)
 {
+    // If sniffer disabled — do nothing silently
+    if (!g_enabled) return;
+
     if (g_udp_socket < 0) {
-        ESP_LOGE(TAG, "❌ Socket not initialized!");
+        // socket closed or not initialized — silently drop
+        g_udp_out_pos = g_udp_out_buffer;
+        g_last_flush_time = xTaskGetTickCount();
+        return;
+    }
+
+    // If no known peer — drop buffered data
+    if (!g_pc_connected) {
+        g_udp_out_pos = g_udp_out_buffer;
+        g_last_flush_time = xTaskGetTickCount();
         return;
     }
     
@@ -393,9 +444,9 @@ static void flush_udp_buffer(void)
         }
         //ESP_LOGI(TAG, "   HEX: %s%s", hexbuf, buffer_size > 64 ? "..." : "");
         
-        int sent = sendto(g_udp_socket, g_udp_out_buffer, 
-                         buffer_size, 0,
-                         (struct sockaddr *)&g_pc_addr, sizeof(g_pc_addr));
+        int sent = sendto(g_udp_socket, g_udp_out_buffer,
+                 buffer_size, 0,
+                 (struct sockaddr *)&g_pc_addr, sizeof(g_pc_addr));
         
         if (sent > 0) {
             //ESP_LOGI(TAG, "✅ Sent %d bytes successfully", sent);
@@ -408,6 +459,42 @@ static void flush_udp_buffer(void)
         g_udp_out_pos = g_udp_out_buffer;
         g_last_flush_time = xTaskGetTickCount();
     }
+}
+
+static void start_sniffer_now(void)
+{
+    if (g_started) return;
+    g_started = true;
+
+    ESP_LOGI(TAG, "🔌 Starting sniffer now (event-driven)");
+
+    if (create_udp_socket(g_config.udp_port) != ESP_OK) {
+        ESP_LOGE(TAG, "❌ UDP socket creation failed in start_sniffer_now");
+        g_started = false;
+        return;
+    }
+
+    BaseType_t task_created = xTaskCreatePinnedToCore(
+        wifi_can_sniffer_task,
+        "wifi_can_sniffer",
+        4096,
+        NULL,
+        4,
+        &g_wifi_task_handle,
+        0
+    );
+
+    if (task_created != pdPASS) {
+        ESP_LOGE(TAG, "❌ Failed to create Wi-Fi CAN-Sniffer listener task");
+        close(g_udp_socket);
+        g_udp_socket = -1;
+        g_started = false;
+        return;
+    }
+
+    g_stat_time = xTaskGetTickCount();
+    g_last_flush_time = xTaskGetTickCount();
+    ESP_LOGI(TAG, "✅ Wi-Fi CAN-Sniffer READY (event-driven)");
 }
 
 /**
@@ -470,72 +557,57 @@ esp_err_t wifi_can_sniffer_init(const wifi_can_sniffer_config_t *config)
              config->wifi_ssid, config->pc_ip_str, config->udp_port);
 
     memcpy(&g_config, config, sizeof(wifi_can_sniffer_config_t));
+    memcpy(&g_config, config, sizeof(wifi_can_sniffer_config_t));
 
-    // Инициализация Wi-Fi
-    ESP_LOGI(TAG, "📡 Step 1: Initializing Wi-Fi AP...");
-    esp_err_t ret = wifi_init_ap(config->wifi_ssid, config->wifi_password);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "❌ Wi-Fi init failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "✅ Wi-Fi AP initialized");
-
-    // Создание UDP сокета
-    ESP_LOGI(TAG, "🔌 Step 2: Creating UDP socket...");
-    ret = create_udp_socket(config->udp_port);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "❌ UDP socket creation failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    ESP_LOGI(TAG, "✅ UDP socket created");
-
-    // Парсим IP адрес PC
-    ESP_LOGI(TAG, "🎯 Step 3: Configuring PC address...");
-    g_pc_addr.sin_family = AF_INET;
-    g_pc_addr.sin_port = htons(config->udp_port);
-    g_pc_addr.sin_addr.s_addr = inet_addr(config->pc_ip_str);
-
-    if (g_pc_addr.sin_addr.s_addr == INADDR_NONE) {
-        ESP_LOGE(TAG, "❌ Invalid IP address: %s", config->pc_ip_str);
-        return ESP_FAIL;
+    // Инициализация Wi-Fi: не создаём свою AP, используем AP, созданную плеером
+    ESP_LOGI(TAG, "📡 Step 1: Using player's AP (will NOT create its own AP)...");
+    esp_err_t ret = ESP_OK;
+    esp_netif_t *ap_netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap_netif) {
+        ESP_LOGI(TAG, "ℹ️ Found existing AP netif; will use existing AP");
+    } else {
+        ESP_LOGW(TAG, "⚠️ AP netif not found. The player is expected to create the AP later.");
     }
 
-    ESP_LOGI(TAG, "📍 Target IP: %s (raw: 0x%08X)", config->pc_ip_str, g_pc_addr.sin_addr.s_addr);
-    ESP_LOGI(TAG, "📍 Target Port: %d (0x%04X, network order: 0x%04X)", 
-             config->udp_port, config->udp_port, g_pc_addr.sin_port);
-    
-    // Розбір IP на октети для перевірки
-    uint8_t *ip_bytes = (uint8_t *)&g_pc_addr.sin_addr.s_addr;
-    ESP_LOGI(TAG, "📍 IP bytes: %d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+    // TCP/IP stack and default event loop must be initialized by the main application
+    if (g_verbose_logs && g_wifi_can_sniffer_logs) ESP_LOGI(TAG, "ℹ️ Assuming esp_netif and default event loop are already initialized by app_main");
 
-    // Запуск слушающей задачи
-        ESP_LOGI(TAG, "🔄 Step 4: Creating listener task...");
-    BaseType_t task_created = xTaskCreatePinnedToCore(
-        wifi_can_sniffer_task, 
-        "wifi_can_sniffer", 
-        4096, 
-        NULL, 
-        4,  // приоритет
-        &g_wifi_task_handle,
-        0   // CPU0
-    );
-
-    if (task_created != pdPASS) {
-        ESP_LOGE(TAG, "❌ Failed to create Wi-Fi CAN-Sniffer task");
-            ESP_LOGI(TAG, "✅ Listener task created");
-        return ESP_FAIL;
+    // Register for IP events so we can start when IP is obtained (STA) or AP assigns IP
+    esp_err_t r = esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL);
+    if (r != ESP_OK && r != ESP_ERR_INVALID_ARG) {
+        ESP_LOGW(TAG, "⚠️ Failed to register IP event handler: %s", esp_err_to_name(r));
     }
 
-    g_stat_time = xTaskGetTickCount();
-    g_last_flush_time = xTaskGetTickCount();
-    g_pc_connected = true;  // В режимі AP завжди готові відправляти
+    // If AP already exists, set broadcast and start immediately
+    if (ap_netif) {
+        g_pc_addr.sin_family = AF_INET;
+        g_pc_addr.sin_port = htons(g_config.udp_port);
+        g_pc_addr.sin_addr.s_addr = inet_addr("192.168.4.255");
+        g_pc_connected = true;
+        ESP_LOGI(TAG, "AP present at init; sniffer will start only if enabled via web/init");
+    } else {
+        ESP_LOGI(TAG, "ℹ️ AP will be created by player; sniffer will start when IP event occurs");
+    }
 
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
-    ESP_LOGI(TAG, "✅ Wi-Fi CAN-Sniffer READY");
-    ESP_LOGI(TAG, "📡 AP: %s (192.168.4.1)", config->wifi_ssid);
-    ESP_LOGI(TAG, "🎯 Target: %s:%d", config->pc_ip_str, config->udp_port);
-    ESP_LOGI(TAG, "═══════════════════════════════════════════════");
+    // Mark as enabled now that init completed
+    g_enabled = true;
+
+    // If AP already existed at init, start sniffer now (we've just been enabled)
+    if (ap_netif) {
+        start_sniffer_now();
+    }
+
     return ESP_OK;
+}
+
+/**
+ * @brief Откладенный стартер: ждём 15 секунд, затем инициализируем сокет и слушатель.
+ */
+static void wifi_can_sniffer_startup_task(void *pvParameters)
+{
+    (void)pvParameters;
+    // This function no longer used; kept to satisfy any references but does nothing.
+    vTaskDelete(NULL);
 }
 
 esp_err_t wifi_can_sniffer_send(uint32_t can_id, uint8_t dlc, const uint8_t *data)
@@ -544,9 +616,10 @@ esp_err_t wifi_can_sniffer_send(uint32_t can_id, uint8_t dlc, const uint8_t *dat
         ESP_LOGW(TAG, "Invalid args: dlc=%d, data=%p", dlc, data);
         return ESP_ERR_INVALID_ARG;
     }
-    
+    // If sniffer disabled, silently fail
+    if (!g_enabled) return ESP_FAIL;
     if (g_udp_socket < 0) {
-        ESP_LOGW(TAG, "UDP socket not initialized");
+        // socket not initialized — silently fail
         return ESP_FAIL;
     }
 
@@ -602,6 +675,19 @@ void wifi_can_sniffer_flush(void)
 
 void wifi_can_sniffer_deinit(void)
 {
+    // Mark disabled so event handler won't restart sniffer
+    g_enabled = false;
+    g_started = false;
+    g_pc_connected = false;
+
+    // Clear outgoing buffer
+    memset(g_udp_out_buffer, 0, UDP_BUFFER_SIZE);
+    g_udp_out_pos = g_udp_out_buffer;
+
+    // Unregister event handlers if they were registered
+    esp_event_handler_unregister(IP_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
+    esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
+
     if (g_wifi_task_handle) {
         vTaskDelete(g_wifi_task_handle);
         g_wifi_task_handle = NULL;
@@ -612,6 +698,6 @@ void wifi_can_sniffer_deinit(void)
         g_udp_socket = -1;
     }
 
-    esp_wifi_stop();
+    // Do NOT stop system Wi-Fi here (it may be used by the main application)
     ESP_LOGI(TAG, "Wi-Fi CAN-Sniffer deinitialized");
 }
