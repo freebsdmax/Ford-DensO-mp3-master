@@ -80,6 +80,7 @@
 #include "uart_ota_protocol.h"  // UART OTA протокол
 #include "player_version.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
+#include "elm327_emu.h"         // ELM327 емулятор для діагностики
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 
 static const char *TAG = "Player";

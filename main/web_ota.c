@@ -7,6 +7,7 @@
 #include "uart_ota_protocol.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
+#include "elm327_emu.h"
 
 #include <stdarg.h> // for va_list
 
@@ -764,10 +765,11 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); };"
-"</script>"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} };"
+
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>ESP32 Music Player — web control • by your device</footer>"
-"</div></div></body></html>";
+
+"</body></html>";
 
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
@@ -1704,6 +1706,56 @@ static esp_err_t component_logs_post_handler(httpd_req_t *req)
 }
 
 
+static esp_err_t elm327_config_get_handler(httpd_req_t *req)
+{
+    elm327_config_t cfg;
+    if (elm327_emu_get_config(&cfg) != ESP_OK) {
+        elm327_emu_load_config(&cfg);
+    }
+    char resp[128];
+    sprintf(resp, "{\"enabled\":%d,\"wifi_enabled\":%d,\"bt_enabled\":%d}", cfg.enabled?1:0, cfg.wifi_enabled?1:0, cfg.bt_enabled?1:0);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
+static esp_err_t elm327_config_post_handler(httpd_req_t *req)
+{
+    char buf[256];
+    int ret, remaining = req->content_len;
+    if (remaining > 255) remaining = 255;
+    if (remaining < 0) remaining = 0;
+    ret = httpd_req_recv(req, buf, remaining);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty");
+        return ESP_FAIL;
+    }
+    buf[ret] = 0;
+    elm327_config_t cfg = {0};
+    if (strstr(buf, "\"enabled\":1") || strstr(buf, "\"enabled\":true")) cfg.enabled = true;
+    if (strstr(buf, "\"wifi_enabled\":1") || strstr(buf, "\"wifi_enabled\":true")) cfg.wifi_enabled = true;
+    if (strstr(buf, "\"bt_enabled\":1") || strstr(buf, "\"bt_enabled\":true")) cfg.bt_enabled = true;
+    if (elm327_emu_set_config(&cfg) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "err");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"status\":\"ok\"}", 15);
+    return ESP_OK;
+}
+
+static esp_err_t elm327_status_handler(httpd_req_t *req)
+{
+    elm327_config_t cfg;
+    elm327_emu_get_config(&cfg);
+    char resp[160];
+    sprintf(resp, "{\"enabled\":%d,\"wifi_enabled\":%d,\"bt_enabled\":%d,\"running\":%d}", cfg.enabled?1:0, cfg.wifi_enabled?1:0, cfg.bt_enabled?1:0, (cfg.enabled && (cfg.wifi_enabled || cfg.bt_enabled)) ? 1 : 0);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, resp, strlen(resp));
+    return ESP_OK;
+}
+
+
 
 esp_err_t web_ota_start(void)
 {
@@ -1905,6 +1957,19 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &restart);
     httpd_register_uri_handler(s_server, &component_logs_post);
     httpd_register_uri_handler(s_server, &component_logs_get);
+    {
+        httpd_uri_t u1 = { .uri = "/elm327_config", .method = HTTP_GET, .handler = elm327_config_get_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(s_server, &u1);
+    }
+    {
+        httpd_uri_t u2 = { .uri = "/elm327_config", .method = HTTP_POST, .handler = elm327_config_post_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(s_server, &u2);
+    }
+    {
+        httpd_uri_t u3 = { .uri = "/elm327_status", .method = HTTP_GET, .handler = elm327_status_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(s_server, &u3);
+    }
+
 
     ESP_LOGI(TAG, "Web OTA server started on port %d", config.server_port);
     ESP_LOGI(TAG, "Registered URI handlers: root, upload, upload_storage, upload_slave, status, version, playlist, player_cmd, player_status, sleep_settings_get, sleep_settings_post, wifi_settings_get, wifi_settings_post, logs, log_level_get, log_level_post, verbose_logs_get, verbose_logs_post, restart, component_logs_get, component_logs_post");
