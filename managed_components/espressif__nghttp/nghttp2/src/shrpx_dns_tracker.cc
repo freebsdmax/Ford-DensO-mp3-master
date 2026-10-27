@@ -64,10 +64,11 @@ ResolverEntry DNSTracker::make_entry(std::unique_ptr<DualDNSResolver> resolv,
                                      const Address *result) {
   auto &dnsconf = get_config()->dns;
 
-  auto ent = ResolverEntry{};
-  ent.resolv = std::move(resolv);
-  ent.host = std::move(host);
-  ent.status = status;
+  auto ent = ResolverEntry{
+    .host = std::move(host),
+    .resolv = std::move(resolv),
+    .status = status,
+  };
   switch (status) {
   case DNSResolverStatus::ERROR:
   case DNSResolverStatus::OK:
@@ -109,20 +110,19 @@ DNSResolverStatus DNSTracker::resolve(Address *result, DNSQuery *dnsq) {
 
   auto it = ents_.find(dnsq->host);
 
-  if (it == std::end(ents_)) {
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "DNS entry not found for " << dnsq->host;
+  if (it == std::ranges::end(ents_)) {
+    if (log_enabled(INFO)) {
+      Log{INFO} << "DNS entry not found for " << dnsq->host;
     }
 
     auto resolv = std::make_unique<DualDNSResolver>(loop_, family_);
-    auto host_copy =
-      ImmutableString{std::begin(dnsq->host), std::end(dnsq->host)};
-    auto host = StringRef{host_copy};
+    auto host_copy = ImmutableString{dnsq->host};
+    auto host = as_string_view(host_copy);
 
     rv = resolv->resolve(host);
     if (rv != 0) {
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "Name lookup failed for " << host;
+      if (log_enabled(INFO)) {
+        Log{INFO} << "Name lookup failed for " << host;
       }
 
       ents_.emplace(host, make_entry(nullptr, std::move(host_copy),
@@ -135,8 +135,8 @@ DNSResolverStatus DNSTracker::resolve(Address *result, DNSQuery *dnsq) {
 
     switch (resolv->get_status(result)) {
     case DNSResolverStatus::ERROR:
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "Name lookup failed for " << host;
+      if (log_enabled(INFO)) {
+        Log{INFO} << "Name lookup failed for " << host;
       }
 
       ents_.emplace(host, make_entry(nullptr, std::move(host_copy),
@@ -146,9 +146,9 @@ DNSResolverStatus DNSTracker::resolve(Address *result, DNSQuery *dnsq) {
 
       return DNSResolverStatus::ERROR;
     case DNSResolverStatus::OK:
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "Name lookup succeeded: " << host << " -> "
-                  << util::numeric_name(&result->su.sa, result->len);
+      if (log_enabled(INFO)) {
+        Log{INFO} << "Name lookup succeeded: " << host << " -> "
+                  << util::numeric_name(result->as_sockaddr(), result->size());
       }
 
       ents_.emplace(host, make_entry(nullptr, std::move(host_copy),
@@ -179,18 +179,18 @@ DNSResolverStatus DNSTracker::resolve(Address *result, DNSQuery *dnsq) {
 
   if (ent.status != DNSResolverStatus::RUNNING &&
       ent.expiry < std::chrono::steady_clock::now()) {
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "DNS entry found for " << dnsq->host
+    if (log_enabled(INFO)) {
+      Log{INFO} << "DNS entry found for " << dnsq->host
                 << ", but it has been expired";
     }
 
     auto resolv = std::make_unique<DualDNSResolver>(loop_, family_);
-    auto host = StringRef{ent.host};
+    auto host = as_string_view(ent.host);
 
     rv = resolv->resolve(host);
     if (rv != 0) {
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "Name lookup failed for " << host;
+      if (log_enabled(INFO)) {
+        Log{INFO} << "Name lookup failed for " << host;
       }
 
       update_entry(ent, nullptr, DNSResolverStatus::ERROR, nullptr);
@@ -200,17 +200,17 @@ DNSResolverStatus DNSTracker::resolve(Address *result, DNSQuery *dnsq) {
 
     switch (resolv->get_status(result)) {
     case DNSResolverStatus::ERROR:
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "Name lookup failed for " << host;
+      if (log_enabled(INFO)) {
+        Log{INFO} << "Name lookup failed for " << host;
       }
 
       update_entry(ent, nullptr, DNSResolverStatus::ERROR, nullptr);
 
       return DNSResolverStatus::ERROR;
     case DNSResolverStatus::OK:
-      if (LOG_ENABLED(INFO)) {
-        LOG(INFO) << "Name lookup succeeded: " << host << " -> "
-                  << util::numeric_name(&result->su.sa, result->len);
+      if (log_enabled(INFO)) {
+        Log{INFO} << "Name lookup succeeded: " << host << " -> "
+                  << util::numeric_name(result->as_sockaddr(), result->size());
       }
 
       update_entry(ent, nullptr, DNSResolverStatus::OK, result);
@@ -228,24 +228,25 @@ DNSResolverStatus DNSTracker::resolve(Address *result, DNSQuery *dnsq) {
 
   switch (ent.status) {
   case DNSResolverStatus::RUNNING:
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "Waiting for name lookup complete for " << dnsq->host;
+    if (log_enabled(INFO)) {
+      Log{INFO} << "Waiting for name lookup complete for " << dnsq->host;
     }
     ent.qlist.append(dnsq);
     dnsq->in_qlist = true;
     return DNSResolverStatus::RUNNING;
   case DNSResolverStatus::ERROR:
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "Name lookup failed for " << dnsq->host << " (cached)";
+    if (log_enabled(INFO)) {
+      Log{INFO} << "Name lookup failed for " << dnsq->host << " (cached)";
     }
     return DNSResolverStatus::ERROR;
   case DNSResolverStatus::OK:
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "Name lookup succeeded (cached): " << dnsq->host << " -> "
-                << util::numeric_name(&ent.result.su.sa, ent.result.len);
+    if (log_enabled(INFO)) {
+      Log{INFO} << "Name lookup succeeded (cached): " << dnsq->host << " -> "
+                << util::numeric_name(ent.result.as_sockaddr(),
+                                      ent.result.size());
     }
     if (result) {
-      memcpy(result, &ent.result, sizeof(*result));
+      *result = ent.result;
     }
     return DNSResolverStatus::OK;
   default:
@@ -287,7 +288,7 @@ void DNSTracker::cancel(DNSQuery *dnsq) {
   }
 
   auto it = ents_.find(dnsq->host);
-  if (it == std::end(ents_)) {
+  if (it == std::ranges::end(ents_)) {
     return;
   }
 
@@ -305,12 +306,12 @@ void DNSTracker::start_gc_timer() {
 }
 
 void DNSTracker::gc() {
-  if (LOG_ENABLED(INFO)) {
-    LOG(INFO) << "Starting removing expired DNS cache entries";
+  if (log_enabled(INFO)) {
+    Log{INFO} << "Starting removing expired DNS cache entries";
   }
 
   auto now = std::chrono::steady_clock::now();
-  for (auto it = std::begin(ents_); it != std::end(ents_);) {
+  for (auto it = std::ranges::begin(ents_); it != std::ranges::end(ents_);) {
     auto &ent = (*it).second;
     if (ent.expiry >= now) {
       ++it;

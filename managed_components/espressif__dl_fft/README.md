@@ -1,9 +1,13 @@
 # DL_FFT
 
-DL_FFT is a lightweight FFT library supporting both float32 and int16 data types.
+DL_FFT is a lightweight FFT library supporting float32, int16 and int32 data types.
 
 The float FFT implementation is come from esp-dsp. And we further optimized the int16 FFT to achieving better precision.
 For int16 FFT, we recommend to use `dl_fft_s16_hp_run` or `dl_rfft_s16_hp_run` interface. `hp` means "high precision".
+
+The int32 FFT (`dl_fft_s32_run` / `dl_rfft_s32_run`) is a portable C implementation with unbiased rounding. It reaches
+more than 130 dB SNR and is the fastest choice on chips without FPU and FFT SIMD instructions, such as ESP32-C3, ESP32-C5.
+Its inputs must stay in (-2^29, 2^29); scale them close to this bound for the best precision.
 
 ## Get Started
 
@@ -54,9 +58,48 @@ dl_rfft_s16_hp_run(fft_handle, x, fft_exponent, &ifft_exponent);
 dl_short_to_float(x, nfft, ifft_exponent, y); // convert output from int16_t to float
 dl_rfft_s16_deinit(fft_handle);
 
+// int32 rfft
+int32_t *x = (int32_t *)heap_caps_aligned_alloc(16, nfft * sizeof(int32_t), MALLOC_CAP_8BIT);
+int in_exponent = -28;  //  float y = x * 2^in_exponent, |x| < 2^29
+int fft_exponent;
+dl_fft_s32_t *fft_handle = dl_rfft_s32_init(nfft, MALLOC_CAP_8BIT);
+dl_rfft_s32_run(fft_handle, x, in_exponent, &fft_exponent);
+dl_rfft_s32_deinit(fft_handle);
+
 
 ```
 Please refer to [dl_fft.h](./dl_fft.h) and [dl_rfft.h](./dl_rfft.h) for more details. 
+> Note: The input array x must be allocated with heap_caps_aligned_alloc and aligned to 16 bytes.
+
+
+
+### C++ interface:
+```
+float *x1 = (float *)heap_caps_aligned_alloc(16, nfft * sizeof(float) *2, MALLOC_CAP_8BIT);
+int16_t *x2= (float *)heap_caps_aligned_alloc(16, nfft * sizeof(int16_t)*2, MALLOC_CAP_8BIT);
+FFT *fft = FFT::get_instance();
+
+# float 
+fft->fft(x1, nfft);
+fft->ifft(x1, nfft);
+fft->rfft(x1, nfft);
+fft->irfft(x1, nfft);
+
+#int16_t
+int in_exponent=-15;
+int out_exponent;
+fft->fft_hp(x2, nfft, in_exponent, &out_exponent);
+fft->ifft_hp(x2, nfft, in_exponent, &out_exponent);
+fft->rfft_hp(x2, nfft, in_exponent, &out_exponent);
+fft->irfft_hp(x2, nfft, in_exponent, &out_exponent);
+
+#int32_t, |x3| < 2^29
+int32_t *x3 = (int32_t *)heap_caps_aligned_alloc(16, nfft * sizeof(int32_t) * 2, MALLOC_CAP_8BIT);
+fft->fft(x3, nfft, -28, &out_exponent);
+fft->rfft(x3, nfft, -28, &out_exponent);
+```
+Please refer to [dl_fft.hpp](./dl_fft.hpp) for more details.
+
 > Note: The input array x must be allocated with heap_caps_aligned_alloc and aligned to 16 bytes.
 
 
@@ -70,8 +113,7 @@ Because esp-dsp uses global variables to share FFT tables and other parameters i
 
 1. Provides an unified and simple FFT/IFFT interface. Users no longer need to worry about their FFT results being affected by other programs. All FFT tables are allocated and released within the function scope.  
 2. Reimplements an int16 FFT/IFFT. Dynamic quantization is used during butterfly operations to achieve better precision.  
-3. [TODO] Uses built-in FFT instructions on ESP32-S3 and ESP32-P4 to further accelerate int16 FFT/IFFT.
-
+3. Uses built-in FFT instructions on ESP32-S3 and ESP32-P4 to further accelerate int16 FFT/IFFT.
 
 ## Benchmark
 

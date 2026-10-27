@@ -35,9 +35,9 @@
 #ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
 #  include <wolfssl/options.h>
 #  include <wolfssl/openssl/ssl.h>
-#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#else // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 #  include <openssl/ssl.h>
-#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#endif // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 
 #include <ev.h>
 
@@ -82,7 +82,7 @@ public:
 
   // These functions are used to feed / extract data to
   // nghttp2_session object.
-  int on_read(const uint8_t *data, size_t len);
+  int on_read(std::span<const uint8_t> data);
   int on_write();
 
   // Call this function when HTTP/2 connection was established.  We
@@ -129,4 +129,4 @@ private:
 
 } // namespace shrpx
 
-#endif // SHRPX_LIVE_CHECK_H
+#endif // !defined(SHRPX_LIVE_CHECK_H)

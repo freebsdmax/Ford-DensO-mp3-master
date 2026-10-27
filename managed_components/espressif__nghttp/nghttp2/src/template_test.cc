@@ -39,8 +39,9 @@ namespace nghttp2 {
 namespace {
 const MunitTest tests[]{
   munit_void_test(test_template_immutable_string),
-  munit_void_test(test_template_string_ref),
   munit_void_test(test_template_as_uint8_span),
+  munit_void_test(test_template_as_string_view),
+  munit_void_test(test_template_dlist),
   munit_test_end(),
 };
 } // namespace
@@ -65,6 +66,10 @@ void test_template_immutable_string(void) {
   assert_true(from_cstr == "alpha");
   assert_true(std::string("alpha") == from_cstr);
   assert_true(from_cstr == std::string("alpha"));
+
+  ImmutableString from_stdstr("alpha"s);
+
+  assert_true("alpha" == from_stdstr);
 
   // copy constructor
   ImmutableString src("charlie");
@@ -97,7 +102,7 @@ void test_template_immutable_string(void) {
   assert_size(0, ==, from_cstr.size());
 
   // from string literal
-  auto from_lit = ImmutableString::from_lit("bravo");
+  auto from_lit = "bravo"_is;
 
   assert_string_equal("bravo", from_lit.c_str());
   assert_size(5, ==, from_lit.size());
@@ -147,75 +152,6 @@ void test_template_immutable_string(void) {
   }
 }
 
-void test_template_string_ref(void) {
-  StringRef empty;
-
-  assert_stdsv_equal(""sv, empty);
-  assert_size(0, ==, empty.size());
-
-  // from std::string
-  std::string alpha = "alpha";
-
-  StringRef ref(alpha);
-
-  assert_true("alpha" == ref);
-  assert_true(ref == "alpha");
-  assert_true(alpha == ref);
-  assert_true(ref == alpha);
-  assert_size(5, ==, ref.size());
-
-  // from string literal
-  auto from_lit = "alpha"_sr;
-
-  assert_stdsv_equal("alpha"sv, from_lit);
-  assert_size(5, ==, from_lit.size());
-
-  // from ImmutableString
-  auto im = ImmutableString::from_lit("bravo");
-
-  StringRef imref(im);
-
-  assert_stdsv_equal("bravo"sv, imref);
-  assert_size(5, ==, imref.size());
-
-  // from C-string
-  StringRef cstrref("charlie");
-
-  assert_stdsv_equal("charlie"sv, cstrref);
-  assert_size(7, ==, cstrref.size());
-
-  // from C-string and its length
-  StringRef cstrnref("delta", 5);
-
-  assert_stdsv_equal("delta"sv, cstrnref);
-  assert_size(5, ==, cstrnref.size());
-
-  // operator[]
-  StringRef br_op("foxtrot");
-
-  assert_char('f', ==, br_op[0]);
-  assert_char('o', ==, br_op[1]);
-  assert_char('t', ==, br_op[6]);
-  assert_char('\0', ==, br_op[7]);
-
-  // operator<<
-  {
-    StringRef a("foo");
-    std::stringstream ss;
-    ss << a;
-
-    assert_stdstring_equal("foo", ss.str());
-  }
-
-  // operator +=(std::string &, const StringRef &)
-  {
-    std::string a = "alpha";
-    a += StringRef("bravo");
-
-    assert_stdstring_equal("alphabravo", a);
-  }
-}
-
 void test_template_as_uint8_span(void) {
   uint32_t a[2];
 
@@ -234,6 +170,128 @@ void test_template_as_uint8_span(void) {
   assert_size(sizeof(a), ==, t.size());
   assert_size(sizeof(a), ==, t.extent);
   assert_memory_equal(t.size(), &a, t.data());
+}
+
+void test_template_as_string_view(void) {
+  {
+    auto a = std::to_array<uint8_t>({'a', 'l', 'p', 'h', 'a'});
+
+    assert_stdsv_equal("alpha"sv, as_string_view(a));
+    assert_stdsv_equal(
+      "alpha"sv, as_string_view(std::ranges::begin(a), std::ranges::end(a)));
+    assert_stdsv_equal("alp"sv, as_string_view(std::ranges::begin(a), 3));
+  }
+
+  {
+    auto s = ""s;
+
+    assert_stdsv_equal(""sv, as_string_view(s));
+    assert_stdsv_equal(
+      ""sv, as_string_view(std::ranges::begin(s), std::ranges::end(s)));
+  }
+}
+
+struct Foo {
+  Foo(int n) : dlprev{nullptr}, dlnext{nullptr}, n{n} {}
+
+  Foo *dlprev, *dlnext;
+  int n;
+};
+
+void test_template_dlist(void) {
+  std::array<std::unique_ptr<Foo>, 10> arr;
+  int n = 0;
+  for (auto &f : arr) {
+    f = std::make_unique<Foo>(++n);
+  }
+
+  DList<Foo> dl;
+
+  // append
+  n = 0;
+
+  for (auto &f : arr) {
+    ++n;
+    dl.append(f.get());
+
+    assert_size(static_cast<size_t>(n), ==, dl.size());
+  }
+
+  // iteration
+  n = 0;
+
+  for (auto f = dl.head; f; f = f->dlnext) {
+    ++n;
+
+    assert_int(n, ==, f->n);
+  }
+
+  // move constructor
+  auto dl_move = std::move(dl);
+
+  assert_size(0, ==, dl.size());
+  assert_size(arr.size(), ==, dl_move.size());
+
+  n = 0;
+
+  for (auto f = dl_move.head; f; f = f->dlnext) {
+    ++n;
+
+    assert_int(n, ==, f->n);
+  }
+
+  // move assignment
+  dl = std::move(dl_move);
+
+  assert_size(0, ==, dl_move.size());
+  assert_size(arr.size(), ==, dl.size());
+
+  n = 0;
+
+  for (auto f = dl.head; f; f = f->dlnext) {
+    ++n;
+
+    assert_int(n, ==, f->n);
+  }
+
+  // remove
+  auto del = std::to_array({1, 2, 10, 6, 8});
+
+  for (size_t i = 0; i < del.size(); ++i) {
+    dl.remove(arr[static_cast<size_t>(del[i] - 1)].get());
+
+    assert_size(arr.size() - i - 1, ==, dl.size());
+  }
+
+  auto left = std::to_array<int>({3, 4, 5, 7, 9});
+  auto head = dl.head;
+
+  for (size_t i = 0; i < left.size(); ++i, head = head->dlnext) {
+    assert_not_null(head);
+    assert_int(left[i], ==, head->n);
+  }
+
+  head = dl.tail;
+
+  for (size_t i = left.size(); i > 0; --i, head = head->dlprev) {
+    assert_not_null(head);
+    assert_int(left[i - 1], ==, head->n);
+  }
+
+  // not empty
+  assert_false(dl.empty());
+
+  // delete elements while iterating list
+  for (auto head = dl.head; head;) {
+    auto next = head->dlnext;
+
+    dl.remove(head);
+
+    head = next;
+  }
+
+  // empty
+  assert_true(dl.empty());
 }
 
 } // namespace nghttp2

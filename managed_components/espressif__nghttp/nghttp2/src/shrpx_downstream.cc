@@ -25,6 +25,7 @@
 #include "shrpx_downstream.h"
 
 #include <cassert>
+#include <algorithm>
 
 #include "urlparse.h"
 
@@ -39,7 +40,7 @@
 #include "shrpx_log.h"
 #ifdef HAVE_MRUBY
 #  include "shrpx_mruby.h"
-#endif // HAVE_MRUBY
+#endif // defined(HAVE_MRUBY)
 #include "util.h"
 #include "http2.h"
 
@@ -50,9 +51,9 @@ void header_timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
   auto downstream = static_cast<Downstream *>(w->data);
   auto upstream = downstream->get_upstream();
 
-  if (LOG_ENABLED(INFO)) {
-    DLOG(INFO, downstream) << "request header timeout stream_id="
-                           << downstream->get_stream_id();
+  if (log_enabled(INFO)) {
+    Log{INFO, downstream} << "request header timeout stream_id="
+                          << downstream->get_stream_id();
   }
 
   downstream->disable_upstream_rtimer();
@@ -69,9 +70,9 @@ void upstream_timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
 
   auto which = revents == EV_READ ? "read" : "write";
 
-  if (LOG_ENABLED(INFO)) {
-    DLOG(INFO, downstream) << "upstream timeout stream_id="
-                           << downstream->get_stream_id() << " event=" << which;
+  if (log_enabled(INFO)) {
+    Log{INFO, downstream} << "upstream timeout stream_id="
+                          << downstream->get_stream_id() << " event=" << which;
   }
 
   downstream->disable_upstream_rtimer();
@@ -99,10 +100,10 @@ void downstream_timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
 
   auto which = revents == EV_READ ? "read" : "write";
 
-  if (LOG_ENABLED(INFO)) {
-    DLOG(INFO, downstream) << "downstream timeout stream_id="
-                           << downstream->get_downstream_stream_id()
-                           << " event=" << which;
+  if (log_enabled(INFO)) {
+    Log{INFO, downstream} << "downstream timeout stream_id="
+                          << downstream->get_downstream_stream_id()
+                          << " event=" << which;
   }
 
   downstream->disable_downstream_rtimer();
@@ -189,12 +190,12 @@ Downstream::Downstream(Upstream *upstream, MemchunkPool *mcpool,
   rcbufs_.reserve(32);
 #ifdef ENABLE_HTTP3
   rcbufs3_.reserve(32);
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
 }
 
 Downstream::~Downstream() {
-  if (LOG_ENABLED(INFO)) {
-    DLOG(INFO, this) << "Deleting";
+  if (log_enabled(INFO)) {
+    Log{INFO, this} << "Deleting";
   }
 
   // check nullptr for unittest
@@ -213,7 +214,7 @@ Downstream::~Downstream() {
     auto mruby_ctx = worker->get_mruby_context();
 
     mruby_ctx->delete_downstream(this);
-#endif // HAVE_MRUBY
+#endif // defined(HAVE_MRUBY)
   }
 
 #ifdef HAVE_MRUBY
@@ -224,7 +225,7 @@ Downstream::~Downstream() {
       mruby_ctx->delete_downstream(this);
     }
   }
-#endif // HAVE_MRUBY
+#endif // defined(HAVE_MRUBY)
 
   // DownstreamConnection may refer to this object.  Delete it now
   // explicitly.
@@ -234,14 +235,14 @@ Downstream::~Downstream() {
   for (auto rcbuf : rcbufs3_) {
     nghttp3_rcbuf_decref(rcbuf);
   }
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
 
   for (auto rcbuf : rcbufs_) {
     nghttp2_rcbuf_decref(rcbuf);
   }
 
-  if (LOG_ENABLED(INFO)) {
-    DLOG(INFO, this) << "Deleted";
+  if (log_enabled(INFO)) {
+    Log{INFO, this} << "Deleted";
   }
 }
 
@@ -267,7 +268,7 @@ void Downstream::detach_downstream_connection() {
     const auto &mruby_ctx = group->shared_addr->mruby_ctx;
     mruby_ctx->delete_downstream(this);
   }
-#endif // HAVE_MRUBY
+#endif // defined(HAVE_MRUBY)
 
   dconn_->detach_downstream(this);
 
@@ -292,7 +293,7 @@ std::unique_ptr<DownstreamConnection> Downstream::pop_downstream_connection() {
     const auto &mruby_ctx = group->shared_addr->mruby_ctx;
     mruby_ctx->delete_downstream(this);
   }
-#endif // HAVE_MRUBY
+#endif // defined(HAVE_MRUBY)
 
   return std::unique_ptr<DownstreamConnection>(dconn_.release());
 }
@@ -320,7 +321,7 @@ void Downstream::force_resume_read() {
 namespace {
 const HeaderRefs::value_type *
 search_header_linear_backwards(const HeaderRefs &headers,
-                               const StringRef &name) {
+                               std::string_view name) {
   for (auto it = headers.rbegin(); it != headers.rend(); ++it) {
     auto &kv = *it;
     if (kv.name == name) {
@@ -331,7 +332,7 @@ search_header_linear_backwards(const HeaderRefs &headers,
 }
 } // namespace
 
-StringRef Downstream::assemble_request_cookie() {
+std::string_view Downstream::assemble_request_cookie() {
   size_t len = 0;
 
   for (auto &kv : req_.fs.headers()) {
@@ -343,16 +344,16 @@ StringRef Downstream::assemble_request_cookie() {
   }
 
   auto iov = make_byte_ref(balloc_, len + 1);
-  auto p = std::begin(iov);
+  auto p = std::ranges::begin(iov);
 
   for (auto &kv : req_.fs.headers()) {
     if (kv.token != http2::HD_COOKIE || kv.value.empty()) {
       continue;
     }
 
-    auto end = std::end(kv.value);
-    for (auto it = std::begin(kv.value) + kv.value.size();
-         it != std::begin(kv.value); --it) {
+    auto end = std::ranges::end(kv.value);
+    for (auto it = std::ranges::begin(kv.value) + kv.value.size();
+         it != std::ranges::begin(kv.value); --it) {
       auto c = *(it - 1);
       if (c == ' ' || c == ';') {
         continue;
@@ -361,42 +362,43 @@ StringRef Downstream::assemble_request_cookie() {
       break;
     }
 
-    p = std::copy(std::begin(kv.value), end, p);
-    p = util::copy_lit(p, "; ");
+    p = std::ranges::copy(std::ranges::begin(kv.value), end, p).out;
+    p = std::ranges::copy("; "sv, p).out;
   }
 
   // cut trailing "; "
-  if (p - std::begin(iov) >= 2) {
+  if (p - std::ranges::begin(iov) >= 2) {
     p -= 2;
   }
 
-  return StringRef{std::span{std::begin(iov), p}};
+  return as_string_view(std::ranges::begin(iov), p);
 }
 
-uint32_t Downstream::find_affinity_cookie(const StringRef &name) {
+uint32_t Downstream::find_affinity_cookie(std::string_view name) {
   for (auto &kv : req_.fs.headers()) {
     if (kv.token != http2::HD_COOKIE) {
       continue;
     }
 
-    for (auto it = std::begin(kv.value); it != std::end(kv.value);) {
+    for (auto it = std::ranges::begin(kv.value);
+         it != std::ranges::end(kv.value);) {
       if (*it == '\t' || *it == ' ' || *it == ';') {
         ++it;
         continue;
       }
 
-      auto end = std::find(it, std::end(kv.value), '=');
-      if (end == std::end(kv.value)) {
+      auto end = std::ranges::find(it, std::ranges::end(kv.value), '=');
+      if (end == std::ranges::end(kv.value)) {
         return 0;
       }
 
-      if (name != StringRef{it, end}) {
-        it = std::find(it, std::end(kv.value), ';');
+      if (name != std::string_view{it, end}) {
+        it = std::ranges::find(it, std::ranges::end(kv.value), ';');
         continue;
       }
 
-      it = std::find(end + 1, std::end(kv.value), ';');
-      auto val = StringRef{end + 1, it};
+      it = std::ranges::find(end + 1, std::ranges::end(kv.value), ';');
+      auto val = std::string_view{end + 1, it};
       if (val.size() != 8) {
         return 0;
       }
@@ -423,13 +425,14 @@ size_t Downstream::count_crumble_request_cookie() {
       continue;
     }
 
-    for (auto it = std::begin(kv.value); it != std::end(kv.value);) {
+    for (auto it = std::ranges::begin(kv.value);
+         it != std::ranges::end(kv.value);) {
       if (*it == '\t' || *it == ' ' || *it == ';') {
         ++it;
         continue;
       }
 
-      it = std::find(it, std::end(kv.value), ';');
+      it = std::ranges::find(it, std::ranges::end(kv.value), ';');
 
       ++n;
     }
@@ -443,7 +446,8 @@ void Downstream::crumble_request_cookie(std::vector<nghttp2_nv> &nva) {
       continue;
     }
 
-    for (auto it = std::begin(kv.value); it != std::end(kv.value);) {
+    for (auto it = std::ranges::begin(kv.value);
+         it != std::ranges::end(kv.value);) {
       if (*it == '\t' || *it == ' ' || *it == ';') {
         ++it;
         continue;
@@ -451,7 +455,7 @@ void Downstream::crumble_request_cookie(std::vector<nghttp2_nv> &nva) {
 
       auto first = it;
 
-      it = std::find(it, std::end(kv.value), ';');
+      it = std::ranges::find(it, std::ranges::end(kv.value), ';');
 
       nva.push_back({(uint8_t *)"cookie", (uint8_t *)first, str_size("cookie"),
                      (size_t)(it - first),
@@ -463,35 +467,32 @@ void Downstream::crumble_request_cookie(std::vector<nghttp2_nv> &nva) {
 }
 
 namespace {
-void add_header(size_t &sum, HeaderRefs &headers, const StringRef &name,
-                const StringRef &value, bool no_index, int32_t token) {
+void add_header(size_t &sum, HeaderRefs &headers, std::string_view name,
+                std::string_view value, bool no_index, int32_t token) {
   sum += name.size() + value.size();
   headers.emplace_back(name, value, no_index, token);
 }
 } // namespace
 
 namespace {
-StringRef alloc_header_name(BlockAllocator &balloc, const StringRef &name) {
+std::string_view alloc_header_name(BlockAllocator &balloc,
+                                   std::string_view name) {
   auto iov = make_byte_ref(balloc, name.size() + 1);
-  auto p = std::copy(std::begin(name), std::end(name), std::begin(iov));
-  util::inp_strlower(std::begin(iov), p);
+  auto p = util::tolower(name, std::ranges::begin(iov));
   *p = '\0';
 
-  return StringRef{std::span{std::begin(iov), p}};
+  return as_string_view(std::ranges::begin(iov), p);
 }
 } // namespace
 
 namespace {
 void append_last_header_key(BlockAllocator &balloc, bool &key_prev, size_t &sum,
-                            HeaderRefs &headers, const char *data, size_t len) {
+                            HeaderRefs &headers, std::string_view data) {
   assert(key_prev);
-  sum += len;
+  sum += data.size();
   auto &item = headers.back();
-  auto name =
-    realloc_concat_string_ref(balloc, item.name, StringRef{data, len});
-
-  auto p = const_cast<uint8_t *>(name.byte());
-  util::inp_strlower(p + name.size() - len, p + name.size());
+  auto name = realloc_concat_string_ref(
+    balloc, item.name, std::views::transform(data, util::lowcase));
 
   item.name = name;
   item.token = http2::lookup_token(item.name);
@@ -501,12 +502,11 @@ void append_last_header_key(BlockAllocator &balloc, bool &key_prev, size_t &sum,
 namespace {
 void append_last_header_value(BlockAllocator &balloc, bool &key_prev,
                               size_t &sum, HeaderRefs &headers,
-                              const char *data, size_t len) {
+                              std::string_view data) {
   key_prev = false;
-  sum += len;
+  sum += data.size();
   auto &item = headers.back();
-  item.value =
-    realloc_concat_string_ref(balloc, item.value, StringRef{data, len});
+  item.value = realloc_concat_string_ref(balloc, item.value, data);
 }
 } // namespace
 
@@ -550,30 +550,30 @@ HeaderRefs::value_type *FieldStore::header(int32_t token) {
   return nullptr;
 }
 
-const HeaderRefs::value_type *FieldStore::header(const StringRef &name) const {
+const HeaderRefs::value_type *FieldStore::header(std::string_view name) const {
   return search_header_linear_backwards(headers_, name);
 }
 
-void FieldStore::add_header_token(const StringRef &name, const StringRef &value,
+void FieldStore::add_header_token(std::string_view name, std::string_view value,
                                   bool no_index, int32_t token) {
   shrpx::add_header(buffer_size_, headers_, name, value, no_index, token);
 }
 
-void FieldStore::alloc_add_header_name(const StringRef &name) {
+void FieldStore::alloc_add_header_name(std::string_view name) {
   auto name_ref = alloc_header_name(balloc_, name);
   auto token = http2::lookup_token(name_ref);
-  add_header_token(name_ref, StringRef{}, false, token);
+  add_header_token(name_ref, ""sv, false, token);
   header_key_prev_ = true;
 }
 
-void FieldStore::append_last_header_key(const char *data, size_t len) {
+void FieldStore::append_last_header_key(std::string_view data) {
   shrpx::append_last_header_key(balloc_, header_key_prev_, buffer_size_,
-                                headers_, data, len);
+                                headers_, data);
 }
 
-void FieldStore::append_last_header_value(const char *data, size_t len) {
+void FieldStore::append_last_header_value(std::string_view data) {
   shrpx::append_last_header_value(balloc_, header_key_prev_, buffer_size_,
-                                  headers_, data, len);
+                                  headers_, data);
 }
 
 void FieldStore::clear_headers() {
@@ -581,29 +581,29 @@ void FieldStore::clear_headers() {
   header_key_prev_ = false;
 }
 
-void FieldStore::add_trailer_token(const StringRef &name,
-                                   const StringRef &value, bool no_index,
+void FieldStore::add_trailer_token(std::string_view name,
+                                   std::string_view value, bool no_index,
                                    int32_t token) {
   // Header size limit should be applied to all header and trailer
   // fields combined.
   shrpx::add_header(buffer_size_, trailers_, name, value, no_index, token);
 }
 
-void FieldStore::alloc_add_trailer_name(const StringRef &name) {
+void FieldStore::alloc_add_trailer_name(std::string_view name) {
   auto name_ref = alloc_header_name(balloc_, name);
   auto token = http2::lookup_token(name_ref);
-  add_trailer_token(name_ref, StringRef{}, false, token);
+  add_trailer_token(name_ref, ""sv, false, token);
   trailer_key_prev_ = true;
 }
 
-void FieldStore::append_last_trailer_key(const char *data, size_t len) {
+void FieldStore::append_last_trailer_key(std::string_view data) {
   shrpx::append_last_header_key(balloc_, trailer_key_prev_, buffer_size_,
-                                trailers_, data, len);
+                                trailers_, data);
 }
 
-void FieldStore::append_last_trailer_value(const char *data, size_t len) {
+void FieldStore::append_last_trailer_value(std::string_view data) {
   shrpx::append_last_header_value(balloc_, trailer_key_prev_, buffer_size_,
-                                  trailers_, data, len);
+                                  trailers_, data);
 }
 
 void FieldStore::erase_content_length_and_transfer_encoding() {
@@ -611,7 +611,7 @@ void FieldStore::erase_content_length_and_transfer_encoding() {
     switch (kv.token) {
     case http2::HD_CONTENT_LENGTH:
     case http2::HD_TRANSFER_ENCODING:
-      kv.name = StringRef{};
+      kv.name = ""sv;
       kv.token = -1;
       break;
     }
@@ -676,32 +676,32 @@ DefaultMemchunks *Downstream::get_request_buf() { return &request_buf_; }
 // Downstream. Otherwise, the program will crash.
 int Downstream::push_request_headers() {
   if (!dconn_) {
-    DLOG(INFO, this) << "dconn_ is NULL";
+    Log{INFO, this} << "dconn_ is NULL";
     return -1;
   }
   return dconn_->push_request_headers();
 }
 
-int Downstream::push_upload_data_chunk(const uint8_t *data, size_t datalen) {
-  req_.recv_body_length += datalen;
+int Downstream::push_upload_data_chunk(std::span<const uint8_t> data) {
+  req_.recv_body_length += data.size();
 
   if (!dconn_ && !request_header_sent_) {
-    blocked_request_buf_.append(data, datalen);
-    req_.unconsumed_body_length += datalen;
+    blocked_request_buf_.append(data);
+    req_.unconsumed_body_length += data.size();
     return 0;
   }
 
   // Assumes that request headers have already been pushed to output
   // buffer using push_request_headers().
   if (!dconn_) {
-    DLOG(INFO, this) << "dconn_ is NULL";
+    Log{INFO, this} << "dconn_ is NULL";
     return -1;
   }
-  if (dconn_->push_upload_data_chunk(data, datalen) != 0) {
+  if (dconn_->push_upload_data_chunk(data) != 0) {
     return -1;
   }
 
-  req_.unconsumed_body_length += datalen;
+  req_.unconsumed_body_length += data.size();
 
   return 0;
 }
@@ -712,14 +712,14 @@ int Downstream::end_upload_data() {
     return 0;
   }
   if (!dconn_) {
-    DLOG(INFO, this) << "dconn_ is NULL";
+    Log{INFO, this} << "dconn_ is NULL";
     return -1;
   }
   return dconn_->end_upload_data();
 }
 
 void Downstream::rewrite_location_response_header(
-  const StringRef &upstream_scheme) {
+  std::string_view upstream_scheme) {
   auto hd = resp_.fs.header(http2::HD_LOCATION);
   if (!hd) {
     return;
@@ -752,7 +752,7 @@ void Downstream::set_chunked_response(bool f) { chunked_response_ = f; }
 
 int Downstream::on_read() {
   if (!dconn_) {
-    DLOG(INFO, this) << "dconn_ is NULL";
+    Log{INFO, this} << "dconn_ is NULL";
     return -1;
   }
   return dconn_->on_read();
@@ -786,10 +786,10 @@ bool Downstream::validate_request_recv_body_length() const {
   }
 
   if (req_.fs.content_length != req_.recv_body_length) {
-    if (LOG_ENABLED(INFO)) {
-      DLOG(INFO, this) << "request invalid bodylen: content-length="
-                       << req_.fs.content_length
-                       << ", received=" << req_.recv_body_length;
+    if (log_enabled(INFO)) {
+      Log{INFO, this} << "request invalid bodylen: content-length="
+                      << req_.fs.content_length
+                      << ", received=" << req_.recv_body_length;
     }
     return false;
   }
@@ -803,10 +803,10 @@ bool Downstream::validate_response_recv_body_length() const {
   }
 
   if (resp_.fs.content_length != resp_.recv_body_length) {
-    if (LOG_ENABLED(INFO)) {
-      DLOG(INFO, this) << "response invalid bodylen: content-length="
-                       << resp_.fs.content_length
-                       << ", received=" << resp_.recv_body_length;
+    if (log_enabled(INFO)) {
+      Log{INFO, this} << "response invalid bodylen: content-length="
+                      << resp_.fs.content_length
+                      << ", received=" << resp_.recv_body_length;
     }
     return false;
   }
@@ -869,14 +869,14 @@ void Downstream::inspect_http1_request() {
     if (upgrade) {
       const auto &val = upgrade->value;
       // TODO Perform more strict checking for upgrade headers
-      if (NGHTTP2_CLEARTEXT_PROTO_VERSION_ID ""_sr == val) {
+      if (NGHTTP2_CLEARTEXT_PROTO_VERSION_ID ""sv == val) {
         req_.http2_upgrade_seen = true;
       } else {
         req_.upgrade_request = true;
 
         // TODO Should we check Sec-WebSocket-Key, and
         // Sec-WebSocket-Version as well?
-        if (util::strieq("websocket"_sr, val)) {
+        if (util::strieq("websocket"sv, val)) {
           req_.connect_proto = ConnectProto::WEBSOCKET;
         }
       }
@@ -889,7 +889,7 @@ void Downstream::inspect_http1_request() {
 
   auto expect = req_.fs.header(http2::HD_EXPECT);
   expect_100_continue_ =
-    expect && util::strieq(expect->value, "100-continue"_sr);
+    expect && util::strieq(expect->value, "100-continue"sv);
 }
 
 void Downstream::inspect_http1_response() {
@@ -921,10 +921,10 @@ bool Downstream::get_http2_upgrade_request() const {
          response_state_ == DownstreamState::INITIAL;
 }
 
-StringRef Downstream::get_http2_settings() const {
+std::string_view Downstream::get_http2_settings() const {
   auto http2_settings = req_.fs.header(http2::HD_HTTP2_SETTINGS);
   if (!http2_settings) {
-    return StringRef{};
+    return ""sv;
   }
   return http2_settings->value;
 }
@@ -1102,7 +1102,7 @@ void Downstream::add_retry() { ++num_retry_; }
 
 bool Downstream::no_more_retry() const { return num_retry_ > 50; }
 
-void Downstream::set_request_downstream_host(const StringRef &host) {
+void Downstream::set_request_downstream_host(std::string_view host) {
   request_downstream_host_ = host;
 }
 
@@ -1171,7 +1171,7 @@ void Downstream::add_rcbuf(nghttp3_rcbuf *rcbuf) {
   nghttp3_rcbuf_incref(rcbuf);
   rcbufs3_.push_back(rcbuf);
 }
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
 
 void Downstream::set_downstream_addr_group(
   const std::shared_ptr<DownstreamAddrGroup> &group) {
@@ -1208,7 +1208,7 @@ void Downstream::set_blocked_request_data_eof(bool f) {
   blocked_request_data_eof_ = f;
 }
 
-void Downstream::set_ws_key(const StringRef &key) { ws_key_ = key; }
+void Downstream::set_ws_key(std::string_view key) { ws_key_ = key; }
 
 bool Downstream::get_expect_100_continue() const {
   return expect_100_continue_;

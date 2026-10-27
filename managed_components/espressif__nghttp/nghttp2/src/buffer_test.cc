@@ -34,6 +34,8 @@
 
 #include "buffer.h"
 
+using namespace std::literals;
+
 namespace nghttp2 {
 
 namespace {
@@ -52,38 +54,38 @@ void test_buffer_write(void) {
   assert_size(0, ==, b.rleft());
   assert_size(16, ==, b.wleft());
 
-  b.write("012", 3);
+  b.write(as_uint8_span(std::span{"012"sv}));
 
   assert_size(3, ==, b.rleft());
   assert_size(13, ==, b.wleft());
-  assert_ptr_equal(b.pos, std::begin(b.buf));
+  assert_ptr_equal(b.pos, std::ranges::begin(b.buf));
 
   b.drain(3);
 
   assert_size(0, ==, b.rleft());
   assert_size(13, ==, b.wleft());
-  assert_ptrdiff(3, ==, b.pos - std::begin(b.buf));
+  assert_ptrdiff(3, ==, b.pos - std::ranges::begin(b.buf));
 
-  auto n = b.write("0123456789ABCDEF", 16);
+  auto n = b.write(as_uint8_span(std::span{"0123456789ABCDEF"sv}));
 
-  assert_ssize(13, ==, n);
+  assert_size(13, ==, n);
 
   assert_size(13, ==, b.rleft());
   assert_size(0, ==, b.wleft());
-  assert_ptrdiff(3, ==, b.pos - std::begin(b.buf));
+  assert_ptrdiff(3, ==, b.pos - std::ranges::begin(b.buf));
   assert_memory_equal(13, b.pos, "0123456789ABC");
 
   b.reset();
 
   assert_size(0, ==, b.rleft());
   assert_size(16, ==, b.wleft());
-  assert_ptr_equal(b.pos, std::begin(b.buf));
+  assert_ptr_equal(b.pos, std::ranges::begin(b.buf));
 
   b.write(5);
 
   assert_size(5, ==, b.rleft());
   assert_size(11, ==, b.wleft());
-  assert_ptr_equal(b.pos, std::begin(b.buf));
+  assert_ptr_equal(b.pos, std::ranges::begin(b.buf));
 }
 
 } // namespace nghttp2

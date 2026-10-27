@@ -26,13 +26,14 @@
 
 #ifdef HAVE_UNISTD_H
 #  include <unistd.h>
-#endif // HAVE_UNISTD_H
+#endif // defined(HAVE_UNISTD_H)
 
 #include <cerrno>
 
 #include "shrpx_connection_handler.h"
 #include "shrpx_config.h"
 #include "shrpx_log.h"
+#include "shrpx_worker.h"
 #include "util.h"
 
 using namespace nghttp2;
@@ -42,69 +43,125 @@ namespace shrpx {
 namespace {
 void acceptcb(struct ev_loop *loop, ev_io *w, int revent) {
   auto h = static_cast<AcceptHandler *>(w->data);
-  h->accept_connection();
+
+  constexpr size_t max_num_accept = 10;
+
+  for (size_t i = 0; i < max_num_accept; ++i) {
+    if (h->accept_connection() != 0) {
+      break;
+    }
+  }
 }
 } // namespace
 
-AcceptHandler::AcceptHandler(const UpstreamAddr *faddr, ConnectionHandler *h)
-  : conn_hnr_(h), faddr_(faddr) {
+AcceptHandler::AcceptHandler(Worker *worker, const UpstreamAddr *faddr)
+  : worker_(worker), faddr_(faddr) {
   ev_io_init(&wev_, acceptcb, faddr_->fd, EV_READ);
   wev_.data = this;
-  ev_io_start(conn_hnr_->get_loop(), &wev_);
+  ev_io_start(worker_->get_loop(), &wev_);
 }
 
 AcceptHandler::~AcceptHandler() {
-  ev_io_stop(conn_hnr_->get_loop(), &wev_);
+  ev_io_stop(worker_->get_loop(), &wev_);
   close(faddr_->fd);
 }
 
-void AcceptHandler::accept_connection() {
-  sockaddr_union sockaddr;
-  socklen_t addrlen = sizeof(sockaddr);
+int AcceptHandler::accept_connection() {
+  sockaddr_storage ss;
+  socklen_t addrlen = sizeof(ss);
+  int cfd;
 
+  while ((
 #ifdef HAVE_ACCEPT4
-  auto cfd =
-    accept4(faddr_->fd, &sockaddr.sa, &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC);
-#else  // !HAVE_ACCEPT4
-  auto cfd = accept(faddr_->fd, &sockaddr.sa, &addrlen);
-#endif // !HAVE_ACCEPT4
+           cfd = accept4(faddr_->fd, reinterpret_cast<sockaddr *>(&ss),
+                         &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC)
+#else  // !defined(HAVE_ACCEPT4)
+           cfd = accept(faddr_->fd, reinterpret_cast<sockaddr *>(&ss), &addrlen)
+#endif // !defined(HAVE_ACCEPT4)
+             ) == -1 &&
+         errno == EINTR)
+    ;
 
   if (cfd == -1) {
     switch (errno) {
-    case EINTR:
     case ENETDOWN:
     case EPROTO:
     case ENOPROTOOPT:
     case EHOSTDOWN:
 #ifdef ENONET
     case ENONET:
-#endif // ENONET
+#endif // defined(ENONET)
     case EHOSTUNREACH:
     case EOPNOTSUPP:
     case ENETUNREACH:
-      return;
+      return -1;
     case EMFILE:
     case ENFILE:
-      LOG(WARN) << "acceptor: running out file descriptor; disable acceptor "
+      Log{WARN} << "acceptor: running out file descriptor; disable acceptor "
                    "temporarily";
-      conn_hnr_->sleep_acceptor(get_config()->conn.listener.timeout.sleep);
-      return;
+      worker_->sleep_listener(get_config()->conn.listener.timeout.sleep);
+      return -1;
     default:
-      return;
+      return -1;
     }
   }
 
 #ifndef HAVE_ACCEPT4
   util::make_socket_nonblocking(cfd);
   util::make_socket_closeonexec(cfd);
-#endif // !HAVE_ACCEPT4
+#endif // !defined(HAVE_ACCEPT4)
 
-  conn_hnr_->handle_connection(cfd, &sockaddr.sa, addrlen, faddr_);
+  worker_->handle_connection(cfd, reinterpret_cast<const sockaddr *>(&ss),
+                             addrlen, faddr_);
+
+  return 0;
 }
 
-void AcceptHandler::enable() { ev_io_start(conn_hnr_->get_loop(), &wev_); }
+void AcceptHandler::drain_connection() {
+  sockaddr_storage ss;
+  socklen_t addrlen = sizeof(ss);
+  int cfd;
 
-void AcceptHandler::disable() { ev_io_stop(conn_hnr_->get_loop(), &wev_); }
+  for (;;) {
+    while ((
+#ifdef HAVE_ACCEPT4
+             cfd = accept4(faddr_->fd, reinterpret_cast<sockaddr *>(&ss),
+                           &addrlen, SOCK_NONBLOCK | SOCK_CLOEXEC)
+#else  // !defined(HAVE_ACCEPT4)
+             cfd =
+               accept(faddr_->fd, reinterpret_cast<sockaddr *>(&ss), &addrlen)
+#endif // !defined(HAVE_ACCEPT4)
+               ) == -1 &&
+           errno == EINTR)
+      ;
+
+    if (cfd == -1) {
+      switch (errno) {
+      case EAGAIN:
+#if EAGAIN != EWOULDBLOCK
+      case EWOULDBLOCK:
+#endif // EAGAIN != EWOULDBLOCK
+      case EMFILE:
+      case ENFILE:
+        return;
+      default:
+        continue;
+      }
+    }
+
+#ifndef HAVE_ACCEPT4
+    util::make_socket_nonblocking(cfd);
+    util::make_socket_closeonexec(cfd);
+#endif // !defined(HAVE_ACCEPT4)
+
+    worker_->handle_connection(cfd, reinterpret_cast<const sockaddr *>(&ss),
+                               addrlen, faddr_);
+  }
+}
+
+void AcceptHandler::enable() { ev_io_start(worker_->get_loop(), &wev_); }
+
+void AcceptHandler::disable() { ev_io_stop(worker_->get_loop(), &wev_); }
 
 int AcceptHandler::get_fd() const { return faddr_->fd; }
 

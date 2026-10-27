@@ -1,5 +1,52 @@
 # Changelog
 
+## [1.8.0](https://github.com/espressif/esp-protocols/commits/websocket-v1.8.0)
+
+### Features
+
+- interruptable wait timeout ([848c6a19](https://github.com/espressif/esp-protocols/commit/848c6a19))
+- expose close status code in event data ([30f69321](https://github.com/espressif/esp-protocols/commit/30f69321))
+
+### Bug Fixes
+
+- Fix vsnprintf() potential segfault ([2de1e2c4](https://github.com/espressif/esp-protocols/commit/2de1e2c4))
+- Fix autobahn testee/suite per ws-trasnport changes ([03a30aeb](https://github.com/espressif/esp-protocols/commit/03a30aeb))
+- Fix websocket host port ([16a78c5b](https://github.com/espressif/esp-protocols/commit/16a78c5b))
+- set STOPPED_BIT before task create to avoid stop()/destroy() deadlock ([b2b86d73](https://github.com/espressif/esp-protocols/commit/b2b86d73))
+- fix CLOSE_FRAME_SENT_BIT stale on failed send with close_reconnect ([183bd5c7](https://github.com/espressif/esp-protocols/commit/183bd5c7))
+- Fix close function with auto-reconnect-on-close ([be97cd0a](https://github.com/espressif/esp-protocols/commit/be97cd0a))
+- correct IDF version guard for HTTP redirect support ([2500277d](https://github.com/espressif/esp-protocols/commit/2500277d))
+
+### Updated
+
+- docs: fix esp_websocket_client changelog formatting ([8b4db2c2](https://github.com/espressif/esp-protocols/commit/8b4db2c2))
+
+## [1.7.0](https://github.com/espressif/esp-protocols/commits/websocket-v1.7.0)
+
+### Features
+
+- affinity configuration ([aa55d069](https://github.com/espressif/esp-protocols/commit/aa55d069))
+- websocket autobahn test suit integration ([0f102151](https://github.com/espressif/esp-protocols/commit/0f102151))
+
+### Bug Fixes
+
+- use local test server instead of public echo.websocket.org ([37413999](https://github.com/espressif/esp-protocols/commit/37413999))
+- prevent NULL pointer crash in error handling ([cdf064dc](https://github.com/espressif/esp-protocols/commit/cdf064dc))
+- improve resource cleanup robustness and update destroy API documentation ([3d37eaa7](https://github.com/espressif/esp-protocols/commit/3d37eaa7))
+- fix use-after-free race condition in task stop sequence ([22c77c76](https://github.com/espressif/esp-protocols/commit/22c77c76))
+
+## [1.6.1](https://github.com/espressif/esp-protocols/commits/websocket-v1.6.1)
+
+### Bug Fixes
+
+- Fix race conditions, memory leak, and data loss ([23ca97d5](https://github.com/espressif/esp-protocols/commit/23ca97d5))
+    - Add state check in abort_connection to prevent double-close
+    - Fix memory leak: free errormsg_buffer on disconnect
+    - Reset connection state on reconnect to prevent stale data
+    - Implement lock ordering for separate TX lock mode
+    - Read buffered data immediately after connection to prevent data loss
+    - Added sdkconfig.ci.tx_lock config
+
 ## [1.6.0](https://github.com/espressif/esp-protocols/commits/websocket-v1.6.0)
 
 ### Features
@@ -155,7 +202,9 @@
 ### Updated
 
 - esp_websocket_client: Updated version to 1.0.0 Updated tests to run agains release-v5.0 ([996fef7](https://github.com/espressif/esp-protocols/commit/996fef7))
-- esp_websocket_client: * Error handling improved to show status code from server * Added new API `esp_websocket_client_set_headers` * Dispatches 'WEBSOCKET_EVENT_BEFORE_CONNECT' event before tcp connection ([d047ff5](https://github.com/espressif/esp-protocols/commit/d047ff5))
+- esp_websocket_client: Error handling improved to show status code from server ([d047ff5](https://github.com/espressif/esp-protocols/commit/d047ff5))
+- esp_websocket_client: Added new API `esp_websocket_client_set_headers` ([d047ff5](https://github.com/espressif/esp-protocols/commit/d047ff5))
+- esp_websocket_client: Dispatches 'WEBSOCKET_EVENT_BEFORE_CONNECT' event before tcp connection ([d047ff5](https://github.com/espressif/esp-protocols/commit/d047ff5))
 - unite all tags under common structure py test: update tags under common structure ([c6db3ea](https://github.com/espressif/esp-protocols/commit/c6db3ea))
 - websocket: Support HTTP basic authorization ([1b13448](https://github.com/espressif/esp-protocols/commit/1b13448))
 - Add task_name config option ([1d68884](https://github.com/espressif/esp-protocols/commit/1d68884))

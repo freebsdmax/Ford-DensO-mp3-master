@@ -27,14 +27,14 @@
 
 #include "nghttp2_config.h"
 
+#include <cstdint>
 #include <vector>
 #include <string>
+#include <span>
 
 #ifdef HAVE_LIBXML2
-
 #  include <libxml/HTMLparser.h>
-
-#endif // HAVE_LIBXML2
+#endif // defined(HAVE_LIBXML2)
 
 namespace nghttp2 {
 
@@ -60,24 +60,24 @@ class HtmlParser {
 public:
   HtmlParser(const std::string &base_uri);
   ~HtmlParser();
-  int parse_chunk(const char *chunk, size_t size, int fin);
+  int parse_chunk(std::span<const uint8_t> chunk, int fin);
   const std::vector<std::pair<std::string, ResourceType>> &get_links() const;
   void clear_links();
 
 private:
-  int parse_chunk_internal(const char *chunk, size_t size, int fin);
+  int parse_chunk_internal(std::span<const uint8_t> chunk, int fin);
 
   std::string base_uri_;
   htmlParserCtxtPtr parser_ctx_;
   ParserData parser_data_;
 };
 
-#else // !HAVE_LIBXML2
+#else // !defined(HAVE_LIBXML2)
 
 class HtmlParser {
 public:
   HtmlParser(const std::string &base_uri) {}
-  int parse_chunk(const char *chunk, size_t size, int fin) { return 0; }
+  int parse_chunk(std::span<const uint8_t> chunk, int fin) { return 0; }
   const std::vector<std::pair<std::string, ResourceType>> &get_links() const {
     return links_;
   }
@@ -87,8 +87,8 @@ private:
   std::vector<std::pair<std::string, ResourceType>> links_;
 };
 
-#endif // !HAVE_LIBXML2
+#endif // !defined(HAVE_LIBXML2)
 
 } // namespace nghttp2
 
-#endif // HTML_PARSER_H
+#endif // !defined(HTML_PARSER_H)

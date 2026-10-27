@@ -27,13 +27,13 @@
 #include <sys/stat.h>
 #ifdef HAVE_UNISTD_H
 #  include <unistd.h>
-#endif // HAVE_UNISTD_H
+#endif // defined(HAVE_UNISTD_H)
 #ifdef HAVE_FCNTL_H
 #  include <fcntl.h>
-#endif // HAVE_FCNTL_H
+#endif // defined(HAVE_FCNTL_H)
 #ifdef HAVE_NETINET_IN_H
 #  include <netinet/in.h>
-#endif // HAVE_NETINET_IN_H
+#endif // defined(HAVE_NETINET_IN_H)
 #include <netinet/tcp.h>
 #include <getopt.h>
 
@@ -52,13 +52,13 @@
 #ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
 #  include <wolfssl/options.h>
 #  include <wolfssl/openssl/err.h>
-#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#else // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 #  include <openssl/err.h>
-#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#endif // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 
 #ifdef HAVE_JANSSON
 #  include <jansson.h>
-#endif // HAVE_JANSSON
+#endif // defined(HAVE_JANSSON)
 
 #include "app_helper.h"
 #include "HtmlParser.h"
@@ -69,7 +69,7 @@
 
 #ifndef O_BINARY
 #  define O_BINARY (0)
-#endif // O_BINARY
+#endif // !defined(O_BINARY)
 
 namespace nghttp2 {
 
@@ -99,8 +99,8 @@ Config::Config()
     verify_peer(true),
     ktls(false) {
   nghttp2_option_new(&http2_option);
-  nghttp2_option_set_peer_max_concurrent_streams(http2_option,
-                                                 peer_max_concurrent_streams);
+  nghttp2_option_set_peer_max_concurrent_streams(
+    http2_option, static_cast<uint32_t>(peer_max_concurrent_streams));
   nghttp2_option_set_builtin_recv_extension_type(http2_option, NGHTTP2_ALTSVC);
   nghttp2_option_set_builtin_recv_extension_type(http2_option, NGHTTP2_ORIGIN);
 }
@@ -124,8 +124,7 @@ std::string strip_fragment(const char *raw_uri) {
   const char *end;
   for (end = raw_uri; *end && *end != '#'; ++end)
     ;
-  size_t len = end - raw_uri;
-  return std::string(raw_uri, len);
+  return std::string(raw_uri, end);
 }
 } // namespace
 
@@ -159,25 +158,25 @@ void Request::init_inflater() {
   assert(rv == 0);
 }
 
-StringRef Request::get_real_scheme() const {
+std::string_view Request::get_real_scheme() const {
   return config.scheme_override.empty()
            ? util::get_uri_field(uri.c_str(), u, URLPARSE_SCHEMA)
-           : StringRef{config.scheme_override};
+           : std::string_view{config.scheme_override};
 }
 
-StringRef Request::get_real_host() const {
+std::string_view Request::get_real_host() const {
   return config.host_override.empty()
            ? util::get_uri_field(uri.c_str(), u, URLPARSE_HOST)
-           : StringRef{config.host_override};
+           : std::string_view{config.host_override};
 }
 
 uint16_t Request::get_real_port() const {
   auto scheme = get_real_scheme();
   return config.host_override.empty() ? util::has_uri_field(u, URLPARSE_PORT)
                                           ? u.port
-                                        : scheme == "https"_sr ? 443
-                                                               : 80
-         : config.port_override == 0  ? scheme == "https"_sr ? 443 : 80
+                                        : scheme == "https"sv ? 443
+                                                              : 80
+         : config.port_override == 0  ? scheme == "https"sv ? 443 : 80
                                       : config.port_override;
 }
 
@@ -186,8 +185,7 @@ void Request::init_html_parser() {
   auto scheme = get_real_scheme();
   auto host = get_real_host();
   auto port = get_real_port();
-  auto ipv6_lit =
-    std::find(std::begin(host), std::end(host), ':') != std::end(host);
+  auto ipv6_lit = util::contains(host, ':');
 
   auto base_uri = std::string{scheme};
   base_uri += "://";
@@ -198,8 +196,8 @@ void Request::init_html_parser() {
   if (ipv6_lit) {
     base_uri += ']';
   }
-  if (!((scheme == "https"_sr && port == 443) ||
-        (scheme == "http"_sr && port == 80))) {
+  if (!((scheme == "https"sv && port == 443) ||
+        (scheme == "http"sv && port == 80))) {
     base_uri += ':';
     base_uri += util::utos(port);
   }
@@ -212,12 +210,11 @@ void Request::init_html_parser() {
   html_parser = std::make_unique<HtmlParser>(base_uri);
 }
 
-int Request::update_html_parser(const uint8_t *data, size_t len, int fin) {
+int Request::update_html_parser(std::span<const uint8_t> data, int fin) {
   if (!html_parser) {
     return 0;
   }
-  return html_parser->parse_chunk(reinterpret_cast<const char *>(data), len,
-                                  fin);
+  return html_parser->parse_chunk(data, fin);
 }
 
 std::string Request::make_reqpath() const {
@@ -236,19 +233,19 @@ std::string Request::make_reqpath() const {
 namespace {
 // Perform special handling |host| if it is IPv6 literal and includes
 // zone ID per RFC 6874.
-std::string decode_host(const StringRef &host) {
-  auto zone_start = std::find(std::begin(host), std::end(host), '%');
-  if (zone_start == std::end(host) ||
+std::string decode_host(std::string_view host) {
+  auto zone_start = std::ranges::find(host, '%');
+  if (zone_start == std::ranges::end(host) ||
       !util::ipv6_numeric_addr(
-        std::string(std::begin(host), zone_start).c_str())) {
+        std::string(std::ranges::begin(host), zone_start).c_str())) {
     return std::string{host};
   }
   // case: ::1%
-  if (zone_start + 1 == std::end(host)) {
+  if (zone_start + 1 == std::ranges::end(host)) {
     return {host.data(), host.size() - 1};
   }
   // case: ::1%12 or ::1%1
-  if (zone_start + 3 >= std::end(host)) {
+  if (zone_start + 3 >= std::ranges::end(host)) {
     return std::string{host};
   }
   // If we see "%25", followed by more characters, then decode %25 as
@@ -256,8 +253,8 @@ std::string decode_host(const StringRef &host) {
   auto zone_id_src = (*(zone_start + 1) == '2' && *(zone_start + 2) == '5')
                        ? zone_start + 3
                        : zone_start + 1;
-  auto zone_id = util::percent_decode(zone_id_src, std::end(host));
-  auto res = std::string(std::begin(host), zone_start + 1);
+  auto zone_id = util::percent_decode(zone_id_src, std::ranges::end(host));
+  auto res = std::string(std::ranges::begin(host), zone_start + 1);
   res += zone_id;
   return res;
 }
@@ -298,19 +295,19 @@ bool Request::is_ipv6_literal_addr() const {
 }
 
 Headers::value_type *Request::get_res_header(int32_t token) {
-  auto idx = res_hdidx[token];
+  auto idx = res_hdidx[static_cast<size_t>(token)];
   if (idx == -1) {
     return nullptr;
   }
-  return &res_nva[idx];
+  return &res_nva[static_cast<size_t>(idx)];
 }
 
 Headers::value_type *Request::get_req_header(int32_t token) {
-  auto idx = req_hdidx[token];
+  auto idx = req_hdidx[static_cast<size_t>(token)];
   if (idx == -1) {
     return nullptr;
   }
-  return &req_nva[idx];
+  return &req_nva[static_cast<size_t>(idx)];
 }
 
 void Request::record_request_start_time() {
@@ -385,33 +382,10 @@ int htp_msg_completecb(llhttp_t *htp) {
 }
 } // namespace
 
-namespace {
 constexpr llhttp_settings_t htp_hooks = {
-  htp_msg_begincb,    // llhttp_cb      on_message_begin;
-  nullptr,            // llhttp_data_cb on_url;
-  nullptr,            // llhttp_data_cb on_status;
-  nullptr,            // llhttp_data_cb on_method;
-  nullptr,            // llhttp_data_cb on_version;
-  nullptr,            // llhttp_data_cb on_header_field;
-  nullptr,            // llhttp_data_cb on_header_value;
-  nullptr,            // llhttp_data_cb on_chunk_extension_name;
-  nullptr,            // llhttp_data_cb on_chunk_extension_value;
-  nullptr,            // llhttp_cb      on_headers_complete;
-  nullptr,            // llhttp_data_cb on_body;
-  htp_msg_completecb, // llhttp_cb      on_message_complete;
-  nullptr,            // llhttp_cb      on_url_complete;
-  nullptr,            // llhttp_cb      on_status_complete;
-  nullptr,            // llhttp_cb      on_method_complete;
-  nullptr,            // llhttp_cb      on_version_complete;
-  nullptr,            // llhttp_cb      on_header_field_complete;
-  nullptr,            // llhttp_cb      on_header_value_complete;
-  nullptr,            // llhttp_cb      on_chunk_extension_name_complete;
-  nullptr,            // llhttp_cb      on_chunk_extension_value_complete;
-  nullptr,            // llhttp_cb      on_chunk_header;
-  nullptr,            // llhttp_cb      on_chunk_complete;
-  nullptr,            // llhttp_cb      on_reset;
+  .on_message_begin = htp_msg_begincb,
+  .on_message_complete = htp_msg_completecb,
 };
-} // namespace
 
 namespace {
 int submit_request(HttpClient *client, const Headers &headers, Request *req) {
@@ -438,7 +412,7 @@ int submit_request(HttpClient *client, const Headers &headers, Request *req) {
   if (req->data_prd) {
     if (!config.no_content_length) {
       build_headers.emplace_back("content-length",
-                                 util::utos(req->data_length));
+                                 util::utos(as_unsigned(req->data_length)));
     }
     if (config.expect_continue) {
       expect_continue = true;
@@ -469,7 +443,7 @@ int submit_request(HttpClient *client, const Headers &headers, Request *req) {
       http2::make_field_nv(kv.name, kv.value, http2::no_index(kv.no_index)));
   }
 
-  auto method = http2::get_header(build_headers, ":method");
+  auto method = http2::get_header(build_headers, ":method"sv);
   assert(method);
 
   req->method = method->value;
@@ -481,7 +455,7 @@ int submit_request(HttpClient *client, const Headers &headers, Request *req) {
       trailer_names += ", ";
       trailer_names += config.trailer[i].name;
     }
-    nva.push_back(http2::make_field_v("trailer"_sr, trailer_names));
+    nva.push_back(http2::make_field_v("trailer"sv, trailer_names));
   }
 
   int32_t stream_id;
@@ -610,11 +584,11 @@ bool HttpClient::need_upgrade() const {
 int HttpClient::resolve_host(const std::string &host, uint16_t port) {
   int rv;
   this->host = host;
-  addrinfo hints{};
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_STREAM;
-  hints.ai_protocol = 0;
-  hints.ai_flags = AI_ADDRCONFIG;
+  addrinfo hints{
+    .ai_flags = AI_ADDRCONFIG,
+    .ai_family = AF_UNSPEC,
+    .ai_socktype = SOCK_STREAM,
+  };
   rv = getaddrinfo(host.c_str(), util::utos(port).c_str(), &hints, &addrs);
   if (rv != 0) {
     std::cerr << "[ERROR] getaddrinfo() failed: " << gai_strerror(rv)
@@ -664,8 +638,9 @@ int HttpClient::initiate_connection() {
 
       auto param = SSL_get0_param(ssl);
       X509_VERIFY_PARAM_set_hostflags(param, 0);
-      X509_VERIFY_PARAM_set1_host(param, host_string.c_str(),
-                                  host_string.size());
+      X509_VERIFY_PARAM_set1_host(
+        param, host_string.c_str(),
+        static_cast<nghttp2_ssl_verify_host_length_type>(host_string.size()));
       SSL_set_verify(ssl, SSL_VERIFY_PEER, verify_cb);
 
       if (!util::numeric_host(host_string.c_str())) {
@@ -714,9 +689,9 @@ int HttpClient::initiate_connection() {
 void HttpClient::disconnect() {
   state = ClientState::IDLE;
 
-  for (auto req = std::begin(reqvec); req != std::end(reqvec); ++req) {
-    if ((*req)->continue_timer) {
-      (*req)->continue_timer->stop();
+  for (auto &req : reqvec) {
+    if (req->continue_timer) {
+      req->continue_timer->stop();
     }
   }
 
@@ -749,7 +724,8 @@ void HttpClient::disconnect() {
 int HttpClient::read_clear() {
   ev_timer_again(loop, &rt);
 
-  std::array<uint8_t, 8_k> buf;
+  std::array<uint8_t, 8_k> rawbuf;
+  auto buf = std::span<uint8_t>{rawbuf};
 
   for (;;) {
     ssize_t nread;
@@ -766,7 +742,7 @@ int HttpClient::read_clear() {
       return -1;
     }
 
-    if (on_readfn(*this, buf.data(), nread) != 0) {
+    if (on_readfn(*this, buf.first(as_unsigned(nread))) != 0) {
       return -1;
     }
   }
@@ -777,21 +753,23 @@ int HttpClient::read_clear() {
 int HttpClient::write_clear() {
   ev_timer_again(loop, &rt);
 
-  std::array<struct iovec, 2> iov;
+  std::array<struct iovec, 2> iovbuf;
 
   for (;;) {
     if (on_writefn(*this) != 0) {
       return -1;
     }
 
-    auto iovcnt = wb.riovec(iov.data(), iov.size());
+    auto iov = wb.riovec(iovbuf);
 
-    if (iovcnt == 0) {
+    if (iov.empty()) {
       break;
     }
 
     ssize_t nwrite;
-    while ((nwrite = writev(fd, iov.data(), iovcnt)) == -1 && errno == EINTR)
+    while ((nwrite = writev(fd, iov.data(), static_cast<int>(iov.size()))) ==
+             -1 &&
+           errno == EINTR)
       ;
     if (nwrite == -1) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -802,7 +780,7 @@ int HttpClient::write_clear() {
       return -1;
     }
 
-    wb.drain(nwrite);
+    wb.drain(as_unsigned(nwrite));
   }
 
   ev_io_stop(loop, &wev);
@@ -880,7 +858,7 @@ size_t populate_settings(nghttp2_settings_entry *iv) {
   size_t niv = 3;
 
   iv[0].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
-  iv[0].value = config.max_concurrent_streams;
+  iv[0].value = static_cast<uint32_t>(config.max_concurrent_streams);
 
   iv[1].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
   if (config.window_bits != -1) {
@@ -895,12 +873,12 @@ size_t populate_settings(nghttp2_settings_entry *iv) {
   if (config.header_table_size >= 0) {
     if (config.min_header_table_size < config.header_table_size) {
       iv[niv].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
-      iv[niv].value = config.min_header_table_size;
+      iv[niv].value = static_cast<uint32_t>(config.min_header_table_size);
       ++niv;
     }
 
     iv[niv].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
-    iv[niv].value = config.header_table_size;
+    iv[niv].value = static_cast<uint32_t>(config.header_table_size);
     ++niv;
   }
 
@@ -926,10 +904,9 @@ int HttpClient::on_upgrade_connect() {
   if (rv < 0) {
     return -1;
   }
-  settings_payloadlen = rv;
+  settings_payloadlen = as_unsigned(rv);
   auto token68 =
-    base64::encode(std::begin(settings_payload),
-                   std::begin(settings_payload) + settings_payloadlen);
+    base64::encode(std::span{settings_payload.data(), settings_payloadlen});
   util::to_token68(token68);
 
   std::string req;
@@ -937,11 +914,10 @@ int HttpClient::on_upgrade_connect() {
     // If the request contains upload data, use OPTIONS * to upgrade
     req = "OPTIONS *";
   } else {
-    auto meth =
-      std::find_if(std::begin(config.headers), std::end(config.headers),
-                   [](const auto &kv) { return ":method"_sr == kv.name; });
+    auto meth = std::ranges::find_if(
+      config.headers, [](const auto &kv) { return ":method"sv == kv.name; });
 
-    if (meth == std::end(config.headers)) {
+    if (meth == std::ranges::end(config.headers)) {
       req = "GET ";
       reqvec[0]->method = "GET";
     } else {
@@ -1012,19 +988,20 @@ int HttpClient::on_upgrade_connect() {
   return 0;
 }
 
-int HttpClient::on_upgrade_read(const uint8_t *data, size_t len) {
+int HttpClient::on_upgrade_read(std::span<const uint8_t> data) {
   int rv;
 
-  auto htperr =
-    llhttp_execute(htp.get(), reinterpret_cast<const char *>(data), len);
+  auto htperr = llhttp_execute(
+    htp.get(), reinterpret_cast<const char *>(data.data()), data.size());
   auto nread = htperr == HPE_OK
-                 ? len
+                 ? data.size()
                  : static_cast<size_t>(reinterpret_cast<const uint8_t *>(
                                          llhttp_get_error_pos(htp.get())) -
-                                       data);
+                                       data.data());
 
   if (config.verbose) {
-    std::cout.write(reinterpret_cast<const char *>(data), nread);
+    std::cout.write(reinterpret_cast<const char *>(data.data()),
+                    static_cast<std::streamsize>(nread));
   }
 
   if (htperr != HPE_OK && htperr != HPE_PAUSED_UPGRADE) {
@@ -1063,7 +1040,7 @@ int HttpClient::on_upgrade_read(const uint8_t *data, size_t len) {
 
   // Read remaining data in the buffer because it is not notified
   // callback anymore.
-  rv = on_readfn(*this, data + nread, len - nread);
+  rv = on_readfn(*this, data.subspan(nread));
   if (rv != 0) {
     return rv;
   }
@@ -1088,7 +1065,7 @@ int HttpClient::connection_made() {
 
     SSL_get0_alpn_selected(ssl, &next_proto, &next_proto_len);
     if (next_proto) {
-      auto proto = StringRef{next_proto, next_proto_len};
+      auto proto = as_string_view(next_proto, next_proto_len);
       if (config.verbose) {
         std::cout << "The negotiated protocol: " << proto << std::endl;
       }
@@ -1155,8 +1132,9 @@ int HttpClient::connection_made() {
   }
   // Adjust first request depending on the existence of the upload
   // data
-  for (auto i = std::begin(reqvec) + (need_upgrade() && !reqvec[0]->data_prd);
-       i != std::end(reqvec); ++i) {
+  for (auto i =
+         std::ranges::begin(reqvec) + (need_upgrade() && !reqvec[0]->data_prd);
+       i != std::ranges::end(reqvec); ++i) {
     if (submit_request(this, config.headers, (*i).get()) != 0) {
       return -1;
     }
@@ -1167,19 +1145,19 @@ int HttpClient::connection_made() {
   return 0;
 }
 
-int HttpClient::on_read(const uint8_t *data, size_t len) {
+int HttpClient::on_read(std::span<const uint8_t> data) {
   if (config.hexdump) {
-    util::hexdump(stdout, data, len);
+    util::hexdump(stdout, data.data(), data.size());
   }
 
-  auto rv = nghttp2_session_mem_recv2(session, data, len);
+  auto rv = nghttp2_session_mem_recv2(session, data.data(), data.size());
   if (rv < 0) {
     std::cerr << "[ERROR] nghttp2_session_mem_recv2() returned error: "
-              << nghttp2_strerror(rv) << std::endl;
+              << nghttp2_strerror(static_cast<int>(rv)) << std::endl;
     return -1;
   }
 
-  assert(static_cast<size_t>(rv) == len);
+  assert(static_cast<size_t>(rv) == data.size());
 
   if (nghttp2_session_want_read(session) == 0 &&
       nghttp2_session_want_write(session) == 0 && wb.rleft() == 0) {
@@ -1201,7 +1179,7 @@ int HttpClient::on_write() {
     auto len = nghttp2_session_mem_send2(session, &data);
     if (len < 0) {
       std::cerr << "[ERROR] nghttp2_session_send2() returned error: "
-                << nghttp2_strerror(len) << std::endl;
+                << nghttp2_strerror(static_cast<int>(len)) << std::endl;
       return -1;
     }
 
@@ -1209,7 +1187,7 @@ int HttpClient::on_write() {
       break;
     }
 
-    wb.append(data, len);
+    wb.append(data, as_unsigned(len));
   }
 
   if (nghttp2_session_want_read(session) == 0 &&
@@ -1269,9 +1247,11 @@ int HttpClient::read_tls() {
 
   ERR_clear_error();
 
-  std::array<uint8_t, 8_k> buf;
+  std::array<uint8_t, 8_k> rawbuf;
+  auto buf = std::span<uint8_t>{rawbuf};
+
   for (;;) {
-    auto rv = SSL_read(ssl, buf.data(), buf.size());
+    auto rv = SSL_read(ssl, buf.data(), static_cast<int>(buf.size()));
 
     if (rv <= 0) {
       auto err = SSL_get_error(ssl, rv);
@@ -1286,7 +1266,7 @@ int HttpClient::read_tls() {
       }
     }
 
-    if (on_readfn(*this, buf.data(), rv) != 0) {
+    if (on_readfn(*this, buf.first(static_cast<size_t>(rv))) != 0) {
       return -1;
     }
   }
@@ -1297,20 +1277,18 @@ int HttpClient::write_tls() {
 
   ERR_clear_error();
 
-  struct iovec iov;
-
   for (;;) {
     if (on_writefn(*this) != 0) {
       return -1;
     }
 
-    auto iovcnt = wb.riovec(&iov, 1);
+    auto data = wb.peek();
 
-    if (iovcnt == 0) {
+    if (data.empty()) {
       break;
     }
 
-    auto rv = SSL_write(ssl, iov.iov_base, iov.iov_len);
+    auto rv = SSL_write(ssl, data.data(), static_cast<int>(data.size()));
 
     if (rv <= 0) {
       auto err = SSL_get_error(ssl, rv);
@@ -1327,7 +1305,7 @@ int HttpClient::write_tls() {
       }
     }
 
-    wb.drain(rv);
+    wb.drain(static_cast<size_t>(rv));
   }
 
   ev_io_stop(loop, &wev);
@@ -1355,9 +1333,9 @@ void HttpClient::update_hostport() {
     // convenience to end-user input.
     auto host =
       util::get_uri_field(reqvec[0]->uri.c_str(), reqvec[0]->u, URLPARSE_HOST);
-    auto end = std::find(std::begin(host), std::end(host), '%');
+    auto end = std::ranges::find(host, '%');
     ss << "[";
-    ss.write(host.data(), end - std::begin(host));
+    ss.write(host.data(), end - std::ranges::begin(host));
     ss << "]";
   } else {
     util::write_uri_field(ss, reqvec[0]->uri.c_str(), reqvec[0]->u,
@@ -1379,7 +1357,7 @@ bool HttpClient::add_request(const std::string &uri,
   if (urlparse_parse_url(uri.c_str(), uri.size(), 0, &u) != 0) {
     return false;
   }
-  if (path_cache.count(uri)) {
+  if (path_cache.contains(uri)) {
     return false;
   }
 
@@ -1443,14 +1421,16 @@ void HttpClient::output_har(FILE *outfile) {
   auto entries = json_array();
   json_object_set_new(log, "entries", entries);
 
-  auto dns_delta = std::chrono::duration_cast<std::chrono::microseconds>(
-                     timing.domain_lookup_end_time - timing.start_time)
-                     .count() /
-                   1000.0;
+  auto dns_delta =
+    static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(
+                          timing.domain_lookup_end_time - timing.start_time)
+                          .count()) /
+    1000.0;
   auto connect_delta =
-    std::chrono::duration_cast<std::chrono::microseconds>(
-      timing.connect_end_time - timing.domain_lookup_end_time)
-      .count() /
+    static_cast<double>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+        timing.connect_end_time - timing.domain_lookup_end_time)
+        .count()) /
     1000.0;
 
   for (size_t i = 0; i < reqvec.size(); ++i) {
@@ -1472,22 +1452,25 @@ void HttpClient::output_har(FILE *outfile) {
               req_timing.request_start_time - timing.start_time);
 
     auto wait_delta =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-        req_timing.response_start_time - req_timing.request_start_time)
-        .count() /
+      static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+          req_timing.response_start_time - req_timing.request_start_time)
+          .count()) /
       1000.0;
     auto receive_delta =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-        req_timing.response_end_time - req_timing.response_start_time)
-        .count() /
+      static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+          req_timing.response_end_time - req_timing.response_start_time)
+          .count()) /
       1000.0;
 
     auto time_sum =
-      std::chrono::duration_cast<std::chrono::microseconds>(
-        (i == 0)
-          ? (req_timing.response_end_time - timing.start_time)
-          : (req_timing.response_end_time - req_timing.request_start_time))
-        .count() /
+      static_cast<double>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+          (i == 0)
+            ? (req_timing.response_end_time - timing.start_time)
+            : (req_timing.response_end_time - req_timing.request_start_time))
+          .count()) /
       1000.0;
 
     json_object_set_new(
@@ -1546,7 +1529,7 @@ void HttpClient::output_har(FILE *outfile) {
 
     json_object_set_new(content, "size", json_integer(req->response_len));
 
-    auto content_type_ptr = http2::get_header(req->res_nva, "content-type");
+    auto content_type_ptr = http2::get_header(req->res_nva, "content-type"sv);
 
     const char *content_type = "";
     if (content_type_ptr) {
@@ -1575,22 +1558,23 @@ void HttpClient::output_har(FILE *outfile) {
     json_object_set_new(timings, "receive", json_real(receive_delta));
 
     json_object_set_new(entry, "pageref", json_string(PAGE_ID));
-    json_object_set_new(entry, "connection",
-                        json_string(util::utos(req->stream_id).c_str()));
+    json_object_set_new(
+      entry, "connection",
+      json_string(util::utos(as_unsigned(req->stream_id)).c_str()));
   }
 
   json_dumpf(root, outfile, JSON_PRESERVE_ORDER | JSON_INDENT(2));
   json_decref(root);
 }
-#endif // HAVE_JANSSON
+#endif // defined(HAVE_JANSSON)
 
 namespace {
-void update_html_parser(HttpClient *client, Request *req, const uint8_t *data,
-                        size_t len, int fin) {
+void update_html_parser(HttpClient *client, Request *req,
+                        std::span<const uint8_t> data, int fin) {
   if (!req->html_parser) {
     return;
   }
-  req->update_html_parser(data, len, fin);
+  req->update_html_parser(data, fin);
 
   auto scheme = req->get_real_scheme();
   auto host = req->get_real_host();
@@ -1611,7 +1595,7 @@ void update_html_parser(HttpClient *client, Request *req, const uint8_t *data,
     }
 
     auto link_port = util::has_uri_field(u, URLPARSE_PORT) ? u.port
-                     : scheme == "https"_sr                ? 443
+                     : scheme == "https"sv                 ? 443
                                                            : 80;
 
     if (port != link_port) {
@@ -1654,37 +1638,44 @@ int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
 
   req->response_len += len;
 
+  auto chunk = std::span{data, len};
+
   if (req->inflater) {
-    while (len > 0) {
-      const size_t MAX_OUTLEN = 4_k;
-      std::array<uint8_t, MAX_OUTLEN> out;
-      size_t outlen = MAX_OUTLEN;
-      size_t tlen = len;
-      int rv =
-        nghttp2_gzip_inflate(req->inflater, out.data(), &outlen, data, &tlen);
+    constexpr size_t MAX_OUTLEN = 4_k;
+    std::array<uint8_t, MAX_OUTLEN> rawout;
+
+    while (!chunk.empty()) {
+      auto out = std::span<uint8_t>{rawout};
+      size_t outlen = out.size();
+      auto tlen = chunk.size();
+      int rv = nghttp2_gzip_inflate(req->inflater, out.data(), &outlen,
+                                    chunk.data(), &tlen);
       if (rv != 0) {
         nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE, stream_id,
                                   NGHTTP2_INTERNAL_ERROR);
         break;
       }
 
+      out = out.first(outlen);
+
       if (!config.null_out) {
-        std::cout.write(reinterpret_cast<const char *>(out.data()), outlen);
+        std::cout.write(reinterpret_cast<const char *>(out.data()),
+                        static_cast<std::streamsize>(out.size()));
       }
 
-      update_html_parser(client, req, out.data(), outlen, 0);
-      data += tlen;
-      len -= tlen;
+      update_html_parser(client, req, out, 0);
+      chunk = chunk.subspan(tlen);
     }
 
     return 0;
   }
 
   if (!config.null_out) {
-    std::cout.write(reinterpret_cast<const char *>(data), len);
+    std::cout.write(reinterpret_cast<const char *>(chunk.data()),
+                    static_cast<std::streamsize>(chunk.size()));
   }
 
-  update_html_parser(client, req, data, len, 0);
+  update_html_parser(client, req, chunk, 0);
 
   return 0;
 }
@@ -1694,7 +1685,7 @@ namespace {
 nghttp2_ssize select_padding_callback(nghttp2_session *session,
                                       const nghttp2_frame *frame,
                                       size_t max_payload, void *user_data) {
-  return std::min(max_payload, frame->hd.length + config.padding);
+  return as_signed(std::min(max_payload, frame->hd.length + config.padding));
 }
 } // namespace
 
@@ -1712,7 +1703,7 @@ void check_response_header(nghttp2_session *session, Request *req) {
     return;
   }
 
-  auto status = http2::parse_http_status_code(StringRef{status_hd->value});
+  auto status = http2::parse_http_status_code(status_hd->value);
   if (status == -1) {
     nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE, req->stream_id,
                               NGHTTP2_PROTOCOL_ERROR);
@@ -1723,8 +1714,8 @@ void check_response_header(nghttp2_session *session, Request *req) {
 
   for (auto &nv : req->res_nva) {
     if ("content-encoding" == nv.name) {
-      gzip = util::strieq("gzip"_sr, nv.value) ||
-             util::strieq("deflate"_sr, nv.value);
+      gzip =
+        util::strieq("gzip"sv, nv.value) || util::strieq("deflate"sv, nv.value);
       continue;
     }
   }
@@ -1783,12 +1774,12 @@ int on_begin_headers_callback(nghttp2_session *session,
   }
   case NGHTTP2_PUSH_PROMISE: {
     auto stream_id = frame->push_promise.promised_stream_id;
-    urlparse_url u{};
     nghttp2_extpri extpri{
       .urgency = NGHTTP2_EXTPRI_DEFAULT_URGENCY,
     };
 
-    auto req = std::make_unique<Request>("", u, nullptr, 0, extpri);
+    auto req =
+      std::make_unique<Request>("", urlparse_url{}, nullptr, 0, extpri);
     req->stream_id = stream_id;
 
     nghttp2_session_set_stream_user_data(session, stream_id, req.get());
@@ -1837,8 +1828,8 @@ int on_header_callback(nghttp2_session *session, const nghttp2_frame *frame,
 
     req->header_buffer_size += namelen + valuelen;
 
-    auto nameref = StringRef{name, namelen};
-    auto valueref = StringRef{value, valuelen};
+    auto nameref = as_string_view(name, namelen);
+    auto valueref = as_string_view(value, valuelen);
     auto token = http2::lookup_token(nameref);
 
     http2::index_header(req->res_hdidx, token, req->res_nva.size());
@@ -1863,8 +1854,8 @@ int on_header_callback(nghttp2_session *session, const nghttp2_frame *frame,
 
     req->header_buffer_size += namelen + valuelen;
 
-    auto nameref = StringRef{name, namelen};
-    auto valueref = StringRef{value, valuelen};
+    auto nameref = as_string_view(name, namelen);
+    auto valueref = as_string_view(value, valuelen);
     auto token = http2::lookup_token(nameref);
 
     http2::index_header(req->req_hdidx, token, req->req_nva.size());
@@ -1986,7 +1977,7 @@ int on_frame_recv_callback2(nghttp2_session *session,
     req->uri = uri;
     req->u = u;
 
-    if (client->path_cache.count(uri)) {
+    if (client->path_cache.contains(uri)) {
       nghttp2_submit_rst_stream(session, NGHTTP2_FLAG_NONE,
                                 frame->push_promise.promised_stream_id,
                                 NGHTTP2_CANCEL);
@@ -2085,7 +2076,7 @@ int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
     req->continue_timer->stop();
   }
 
-  update_html_parser(client, req, nullptr, 0, 1);
+  update_html_parser(client, req, {}, 1);
   ++client->complete;
 
   if (client->all_requests_processed()) {
@@ -2112,14 +2103,13 @@ void print_stats(const HttpClient &client) {
     }
   }
 
-  std::sort(std::begin(reqs), std::end(reqs),
-            [](const Request *lhs, const Request *rhs) {
-              const auto &ltiming = lhs->timing;
-              const auto &rtiming = rhs->timing;
-              return ltiming.response_end_time < rtiming.response_end_time ||
-                     (ltiming.response_end_time == rtiming.response_end_time &&
-                      ltiming.request_start_time < rtiming.request_start_time);
-            });
+  std::ranges::sort(reqs, [](const Request *lhs, const Request *rhs) {
+    const auto &ltiming = lhs->timing;
+    const auto &rtiming = rhs->timing;
+    return ltiming.response_end_time < rtiming.response_end_time ||
+           (ltiming.response_end_time == rtiming.response_end_time &&
+            ltiming.request_start_time < rtiming.request_start_time);
+  });
 
   std::cout << R"(
 Request timing:
@@ -2157,7 +2147,7 @@ id  responseEnd requestStart  process code size request path)"
               << ("+" + util::format_duration(request_start)) << " "
               << std::setw(8) << util::format_duration(total) << " "
               << std::setw(4) << req->status << " " << std::setw(4)
-              << util::utos_unit(req->response_len) << " "
+              << util::utos_unit(as_unsigned(req->response_len)) << " "
               << req->make_reqpath() << std::endl;
   }
 }
@@ -2182,15 +2172,16 @@ int communicate(
       goto fin;
     }
 
-    auto ssl_opts = (SSL_OP_ALL & ~SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS) |
-                    SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION |
-                    SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION;
+    auto ssl_opts = static_cast<nghttp2_ssl_op_type>(
+      (SSL_OP_ALL & ~SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS) | SSL_OP_NO_SSLv2 |
+      SSL_OP_NO_SSLv3 | SSL_OP_NO_COMPRESSION |
+      SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
 
 #ifdef SSL_OP_ENABLE_KTLS
     if (config.ktls) {
       ssl_opts |= SSL_OP_ENABLE_KTLS;
     }
-#endif // SSL_OP_ENABLE_KTLS
+#endif // defined(SSL_OP_ENABLE_KTLS)
 
     SSL_CTX_set_options(ssl_ctx, ssl_opts);
     SSL_CTX_set_mode(ssl_ctx, SSL_MODE_AUTO_RETRY);
@@ -2225,7 +2216,7 @@ int communicate(
       result = -1;
       goto fin;
     }
-#endif // NGHTTP2_OPENSSL_IS_WOLFSSL
+#endif // defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 
     if (!config.keyfile.empty()) {
       if (SSL_CTX_use_PrivateKey_file(ssl_ctx, config.keyfile.c_str(),
@@ -2246,9 +2237,9 @@ int communicate(
       }
     }
 
-    auto proto_list = util::get_default_alpn();
-
-    SSL_CTX_set_alpn_protos(ssl_ctx, proto_list.data(), proto_list.size());
+    SSL_CTX_set_alpn_protos(
+      ssl_ctx, reinterpret_cast<const uint8_t *>(NGHTTP2_H2_ALPN.data()),
+      NGHTTP2_H2_ALPN.size());
 
 #if defined(NGHTTP2_OPENSSL_IS_BORINGSSL) && defined(HAVE_LIBBROTLI)
     if (!SSL_CTX_add_cert_compression_alg(
@@ -2259,7 +2250,8 @@ int communicate(
       result = -1;
       goto fin;
     }
-#endif // NGHTTP2_OPENSSL_IS_BORINGSSL && HAVE_LIBBROTLI
+#endif // defined(NGHTTP2_OPENSSL_IS_BORINGSSL) &&
+       // defined(HAVE_LIBBROTLI)
 
     if (tls::setup_keylog_callback(ssl_ctx) != 0) {
       std::cerr << "[ERROR] Failed to setup keylog" << std::endl;
@@ -2318,7 +2310,7 @@ int communicate(
                   << "har file could not be created." << std::endl;
       }
     }
-#endif // HAVE_JANSSON
+#endif // defined(HAVE_JANSSON)
 
     if (client.success != client.reqvec.size()) {
       std::cerr << "Some requests were not processed. total="
@@ -2394,7 +2386,8 @@ int run(char **uris, int n) {
   nghttp2_session_callbacks *callbacks;
 
   nghttp2_session_callbacks_new(&callbacks);
-  auto cbsdel = defer(nghttp2_session_callbacks_del, callbacks);
+  auto cbsdel =
+    defer([callbacks] { nghttp2_session_callbacks_del(callbacks); });
 
   nghttp2_session_callbacks_set_on_stream_close_callback(
     callbacks, on_stream_close_callback);
@@ -2433,13 +2426,15 @@ int run(char **uris, int n) {
       callbacks, select_padding_callback);
   }
 
+  nghttp2_session_callbacks_set_rand_callback(callbacks, util::secure_random);
+
   std::string prev_scheme;
   std::string prev_host;
   uint16_t prev_port = 0;
   int failures = 0;
   int data_fd = -1;
   nghttp2_data_provider2 data_prd;
-  struct stat data_stat {};
+  struct stat data_stat{};
 
   if (!config.datafile.empty()) {
     if (config.datafile == "-") {
@@ -2473,7 +2468,7 @@ int run(char **uris, int n) {
                       << std::endl;
             return 1;
           }
-          while ((wret = write(data_fd, buf.data(), rret)) == -1 &&
+          while ((wret = write(data_fd, buf.data(), as_unsigned(rret))) == -1 &&
                  errno == EINTR)
             ;
           if (wret != rret) {
@@ -2749,7 +2744,7 @@ int main(int argc, char **argv) {
         std::cerr << "-M: Bad option value: " << optarg << std::endl;
         exit(EXIT_FAILURE);
       }
-      config.peer_max_concurrent_streams = *n;
+      config.peer_max_concurrent_streams = static_cast<size_t>(*n);
       break;
     }
     case 'O':
@@ -2764,7 +2759,7 @@ int main(int argc, char **argv) {
         std::cerr << "-b: Bad option value: " << optarg << std::endl;
         exit(EXIT_FAILURE);
       }
-      config.padding = *n;
+      config.padding = static_cast<size_t>(*n);
       break;
     }
     case 'n':
@@ -2777,10 +2772,10 @@ int main(int argc, char **argv) {
     case 'r':
 #ifdef HAVE_JANSSON
       config.harfile = optarg;
-#else  // !HAVE_JANSSON
+#else  // !defined(HAVE_JANSSON)
       std::cerr << "[WARNING]: -r, --har option is ignored because\n"
                 << "the binary was not compiled with libjansson." << std::endl;
-#endif // !HAVE_JANSSON
+#endif // !defined(HAVE_JANSSON)
       break;
     case 'v':
       ++config.verbose;
@@ -2807,22 +2802,22 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
       }
       if (c == 'w') {
-        config.window_bits = *n;
+        config.window_bits = static_cast<int>(*n);
       } else {
-        config.connection_window_bits = *n;
+        config.connection_window_bits = static_cast<int>(*n);
       }
       break;
     }
     case 'H': {
       char *header = optarg;
       // Skip first possible ':' in the header name
-      char *value = strchr(optarg + 1, ':');
-      if (!value || (header[0] == ':' && header + 1 == value)) {
+      auto name_end = strchr(optarg + 1, ':');
+      if (!name_end || (header[0] == ':' && header + 1 == name_end)) {
         std::cerr << "-H: invalid header: " << optarg << std::endl;
         exit(EXIT_FAILURE);
       }
-      *value = 0;
-      value++;
+      *name_end = 0;
+      auto value = name_end + 1;
       while (isspace(*value)) {
         value++;
       }
@@ -2833,17 +2828,17 @@ int main(int argc, char **argv) {
                   << std::endl;
         exit(EXIT_FAILURE);
       }
+      util::tolower(header, name_end, header);
       config.headers.emplace_back(header, value, false);
-      util::inp_strlower(config.headers.back().name);
       break;
     }
     case 'a':
 #ifdef HAVE_LIBXML2
       config.get_assets = true;
-#else  // !HAVE_LIBXML2
+#else  // !defined(HAVE_LIBXML2)
       std::cerr << "[WARNING]: -a, --get-assets option is ignored because\n"
                 << "the binary was not compiled with libxml2." << std::endl;
-#endif // !HAVE_LIBXML2
+#endif // !defined(HAVE_LIBXML2)
       break;
     case 's':
       config.stat = true;
@@ -2857,7 +2852,7 @@ int main(int argc, char **argv) {
         std::cerr << "-m: Bad option value: " << optarg << std::endl;
         exit(EXIT_FAILURE);
       }
-      config.multiply = *n;
+      config.multiply = static_cast<int>(*n);
       break;
     }
     case 'c': {
@@ -2915,13 +2910,13 @@ int main(int argc, char **argv) {
       case 9: {
         // trailer option
         auto header = optarg;
-        auto value = strchr(optarg, ':');
-        if (!value) {
+        auto name_end = strchr(optarg, ':');
+        if (!name_end) {
           std::cerr << "--trailer: invalid header: " << optarg << std::endl;
           exit(EXIT_FAILURE);
         }
-        *value = 0;
-        value++;
+        *name_end = 0;
+        auto value = name_end + 1;
         while (isspace(*value)) {
           value++;
         }
@@ -2932,8 +2927,8 @@ int main(int argc, char **argv) {
                     << std::endl;
           exit(EXIT_FAILURE);
         }
+        util::tolower(header, name_end, header);
         config.trailer.emplace_back(header, value, false);
-        util::inp_strlower(config.trailer.back().name);
         break;
       }
       case 10:
@@ -2952,7 +2947,7 @@ int main(int argc, char **argv) {
                     << std::endl;
           exit(EXIT_FAILURE);
         }
-        config.max_concurrent_streams = *n;
+        config.max_concurrent_streams = static_cast<size_t>(*n);
         break;
       }
       case 13:
@@ -3016,28 +3011,25 @@ int main(int argc, char **argv) {
   if (!config.extpris.empty()) {
     extpri_to_fill = config.extpris.back();
   }
-  config.extpris.insert(std::end(config.extpris), argc - optind,
-                        extpri_to_fill);
+  config.extpris.insert(std::ranges::end(config.extpris),
+                        static_cast<size_t>(argc - optind), extpri_to_fill);
 
   // Find scheme overridden by extra header fields.
-  auto scheme_it =
-    std::find_if(std::begin(config.headers), std::end(config.headers),
-                 [](const Header &nv) { return nv.name == ":scheme"; });
-  if (scheme_it != std::end(config.headers)) {
+  auto scheme_it = std::ranges::find_if(
+    config.headers, [](const Header &nv) { return nv.name == ":scheme"; });
+  if (scheme_it != std::ranges::end(config.headers)) {
     config.scheme_override = (*scheme_it).value;
   }
 
   // Find host and port overridden by extra header fields.
-  auto authority_it =
-    std::find_if(std::begin(config.headers), std::end(config.headers),
-                 [](const Header &nv) { return nv.name == ":authority"; });
-  if (authority_it == std::end(config.headers)) {
-    authority_it =
-      std::find_if(std::begin(config.headers), std::end(config.headers),
-                   [](const Header &nv) { return nv.name == "host"; });
+  auto authority_it = std::ranges::find_if(
+    config.headers, [](const Header &nv) { return nv.name == ":authority"; });
+  if (authority_it == std::ranges::end(config.headers)) {
+    authority_it = std::ranges::find_if(
+      config.headers, [](const Header &nv) { return nv.name == "host"; });
   }
 
-  if (authority_it != std::end(config.headers)) {
+  if (authority_it != std::ranges::end(config.headers)) {
     // authority_it may looks like "host:port".
     auto uri = "https://" + (*authority_it).value;
     urlparse_url u;
@@ -3057,14 +3049,16 @@ int main(int argc, char **argv) {
   set_color_output(color || isatty(fileno(stdout)));
 
   nghttp2_option_set_peer_max_concurrent_streams(
-    config.http2_option, config.peer_max_concurrent_streams);
+    config.http2_option,
+    static_cast<uint32_t>(config.peer_max_concurrent_streams));
 
   if (config.encoder_header_table_size != -1) {
     nghttp2_option_set_max_deflate_dynamic_table_size(
-      config.http2_option, config.encoder_header_table_size);
+      config.http2_option,
+      static_cast<size_t>(config.encoder_header_table_size));
   }
 
-  struct sigaction act {};
+  struct sigaction act{};
   act.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &act, nullptr);
   reset_timer();

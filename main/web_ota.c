@@ -6,6 +6,7 @@
 #include "web_ota.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
+#include "freertos/FreeRTOS.h"
 
 #include <stdarg.h> // for va_list
 
@@ -14,6 +15,8 @@
 static char log_buffer[LOG_BUFFER_SIZE];
 
 static int log_write_pos = 0;
+static size_t log_valid_bytes = 0;
+static portMUX_TYPE log_buffer_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static vprintf_like_t original_vprintf = NULL;
 
@@ -29,29 +32,55 @@ bool g_elm327_logs = true;
 int log_vprintf(const char *fmt, va_list args) {
 
     char temp[256];
-
+    va_list original_args;
+    va_copy(original_args, args);
     int len = vsnprintf(temp, sizeof(temp), fmt, args);
-
-    for(int i = 0; i < len && i < sizeof(temp); i++) {
-
-        log_buffer[log_write_pos] = temp[i];
-
-        log_write_pos = (log_write_pos + 1) % LOG_BUFFER_SIZE;
-
+    size_t count = len > 0 ? (size_t)len : 0;
+    if (count >= sizeof(temp)) {
+        count = sizeof(temp) - 1;
     }
+
+    portENTER_CRITICAL(&log_buffer_mux);
+    for (size_t i = 0; i < count; i++) {
+        log_buffer[log_write_pos] = temp[i];
+        log_write_pos = (log_write_pos + 1) % LOG_BUFFER_SIZE;
+    }
+    log_valid_bytes += count;
+    if (log_valid_bytes > LOG_BUFFER_SIZE) {
+        log_valid_bytes = LOG_BUFFER_SIZE;
+    }
+    portEXIT_CRITICAL(&log_buffer_mux);
 
     // Call original to keep serial output
-
+    int result;
     if (original_vprintf) {
-
-        return original_vprintf(fmt, args);
-
+        result = original_vprintf(fmt, original_args);
     } else {
+        result = vprintf(fmt, original_args);
+    }
+    va_end(original_args);
+    return result;
 
-        return vprintf(fmt, args);
+}
 
+size_t web_ota_copy_logs(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return 0;
     }
 
+    portENTER_CRITICAL(&log_buffer_mux);
+    size_t count = log_valid_bytes;
+    if (count >= buffer_size) {
+        count = buffer_size - 1;
+    }
+    int start = (log_write_pos - (int)count + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
+    for (size_t i = 0; i < count; i++) {
+        buffer[i] = log_buffer[(start + i) % LOG_BUFFER_SIZE];
+    }
+    buffer[count] = '\0';
+    portEXIT_CRITICAL(&log_buffer_mux);
+    return count;
 }
 
 // Extern declarations for player control functions

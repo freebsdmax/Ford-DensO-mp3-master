@@ -32,6 +32,9 @@
 #include <memory>
 #include <vector>
 #include <chrono>
+#include <algorithm>
+#include <ranges>
+#include <source_location>
 
 #include "shrpx_log_config.h"
 #include "tls.h"
@@ -42,61 +45,18 @@ using namespace nghttp2;
 
 #define ENABLE_LOG 1
 
-#define LOG_ENABLED(SEVERITY) (ENABLE_LOG && shrpx::Log::log_enabled(SEVERITY))
-
-#ifdef __FILE_NAME__
-#  define NGHTTP2_FILE_NAME __FILE_NAME__
-#else // !__FILE_NAME__
-#  define NGHTTP2_FILE_NAME __FILE__
-#endif // !__FILE_NAME__
-
-#define LOG(SEVERITY) shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)
-
-// Listener log
-#define LLOG(SEVERITY, LISTEN)                                                 \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[LISTEN:" << LISTEN << "] ")
-
-// Worker log
-#define WLOG(SEVERITY, WORKER)                                                 \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[WORKER:" << WORKER << "] ")
-
-// ClientHandler log
-#define CLOG(SEVERITY, CLIENT_HANDLER)                                         \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[CLIENT_HANDLER:" << CLIENT_HANDLER << "] ")
-
-// Upstream log
-#define ULOG(SEVERITY, UPSTREAM)                                               \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[UPSTREAM:" << UPSTREAM << "] ")
-
-// Downstream log
-#define DLOG(SEVERITY, DOWNSTREAM)                                             \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[DOWNSTREAM:" << DOWNSTREAM << "] ")
-
-// Downstream connection log
-#define DCLOG(SEVERITY, DCONN)                                                 \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[DCONN:" << DCONN << "] ")
-
-// Downstream HTTP2 session log
-#define SSLOG(SEVERITY, HTTP2)                                                 \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[DHTTP2:" << HTTP2 << "] ")
-
-// Memcached connection log
-#define MCLOG(SEVERITY, MCONN)                                                 \
-  (shrpx::Log(SEVERITY, NGHTTP2_FILE_NAME, __LINE__)                           \
-   << "[MCONN:" << MCONN << "] ")
-
 namespace shrpx {
 
 class Downstream;
 struct DownstreamAddr;
 struct LoggingConfig;
+class ConnectionHandler;
+class Worker;
+class ClientHandler;
+class Upstream;
+class DownstreamConnection;
+class Http2Session;
+class MemcachedConnection;
 
 enum SeverityLevel { INFO, NOTICE, WARN, ERROR, FATAL };
 
@@ -104,26 +64,105 @@ using LogBuffer = std::array<uint8_t, 4_k>;
 
 class Log {
 public:
-  Log(int severity, const char *filename, int linenum);
+  Log(int severity,
+      const std::source_location loc = std::source_location::current());
+  Log(SeverityLevel severity, const ConnectionHandler *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    // TODO: This should be CONNECTION_HANDLER.
+    *this << "[LISTEN:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const Worker *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[WORKER:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const ClientHandler *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[CLIENT_HANDLER:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const Upstream *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[UPSTREAM:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const Downstream *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[DOWNSTREAM:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const DownstreamConnection *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[DCONN:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const Http2Session *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[DHTTP2:" << obj << "] ";
+  }
+  Log(SeverityLevel severity, const MemcachedConnection *obj,
+      const std::source_location loc = std::source_location::current())
+    : Log{severity, loc} {
+    *this << "[MCONN:" << obj << "] ";
+  }
+  Log(const Log &) = delete;
+  Log(Log &&) = delete;
   ~Log();
+  Log &operator=(const Log &) = delete;
+  Log &operator=(Log &&) = delete;
   Log &operator<<(const std::string &s);
+  Log &operator<<(std::string_view s);
   Log &operator<<(const char *s);
-  Log &operator<<(const StringRef &s);
   Log &operator<<(const ImmutableString &s);
-  Log &operator<<(short n) { return *this << static_cast<long long>(n); }
-  Log &operator<<(int n) { return *this << static_cast<long long>(n); }
-  Log &operator<<(long n) { return *this << static_cast<long long>(n); }
-  Log &operator<<(long long n);
-  Log &operator<<(unsigned short n) {
-    return *this << static_cast<unsigned long long>(n);
+  template <std::signed_integral T> Log &operator<<(T n) {
+    if (full_) {
+      return *this;
+    }
+
+    if (n >= 0) {
+      return *this << as_unsigned(n);
+    }
+
+    if (flags_ & fmt_hex) {
+      write_hex(as_unsigned(n));
+      return *this;
+    }
+
+    if (wleft() < std::numeric_limits<T>::digits10 + 1 + /* sign */ 1) {
+      full_ = true;
+      return *this;
+    }
+
+    *last_++ = '-';
+
+    last_ = util::utos(
+      static_cast<std::make_unsigned_t<T>>(0u - as_unsigned(n)), last_);
+    update_full();
+
+    return *this;
   }
-  Log &operator<<(unsigned int n) {
-    return *this << static_cast<unsigned long long>(n);
+  template <std::unsigned_integral T> Log &operator<<(T n) {
+    if (full_) {
+      return *this;
+    }
+
+    if (flags_ & fmt_hex) {
+      write_hex(n);
+      return *this;
+    }
+
+    if (wleft() < std::numeric_limits<T>::digits10 + 1) {
+      full_ = true;
+      return *this;
+    }
+
+    last_ = util::utos(n, last_);
+    update_full();
+
+    return *this;
   }
-  Log &operator<<(unsigned long n) {
-    return *this << static_cast<unsigned long long>(n);
-  }
-  Log &operator<<(unsigned long long n);
   Log &operator<<(float n) { return *this << static_cast<double>(n); }
   Log &operator<<(double n);
   Log &operator<<(long double n);
@@ -136,42 +175,24 @@ public:
     func(*this);
     return *this;
   }
-  template <typename InputIt> void write_seq(InputIt first, InputIt last) {
+  template <std::ranges::forward_range R>
+  requires(!std::is_array_v<std::remove_cvref_t<R>>)
+  void write_seq(R &&r) {
     if (full_) {
       return;
     }
 
-    auto d = std::distance(first, last);
-    auto n = std::min(wleft(), static_cast<size_t>(d));
-    last_ = std::copy(first, first + n, last_);
+    auto n = std::min(wleft(), static_cast<size_t>(std::ranges::distance(r)));
+    last_ = std::ranges::copy(std::views::take(r, as_signed(n)), last_).out;
     update_full();
   }
 
-  template <typename T> void write_hex(T n) {
+  template <std::unsigned_integral T> void write_hex(T n) {
     if (full_) {
       return;
     }
 
-    if (n == 0) {
-      if (wleft() < 4 /* for "0x00" */) {
-        full_ = true;
-        return;
-      }
-      *last_++ = '0';
-      *last_++ = 'x';
-      *last_++ = '0';
-      *last_++ = '0';
-      update_full();
-      return;
-    }
-
-    size_t nlen = 0;
-    for (auto t = n; t; t >>= 8, ++nlen)
-      ;
-
-    nlen *= 2;
-
-    if (wleft() < 2 /* for "0x" */ + nlen) {
+    if (wleft() < "0x"sv.size() + sizeof(T) * 2) {
       full_ = true;
       return;
     }
@@ -179,20 +200,13 @@ public:
     *last_++ = '0';
     *last_++ = 'x';
 
-    last_ += nlen;
+    last_ = util::format_hex(n, last_);
     update_full();
-
-    auto p = last_ - 1;
-    for (; n; n >>= 8) {
-      uint8_t b = n & 0xff;
-      *p-- = util::LOWER_XDIGITS[b & 0xf];
-      *p-- = util::LOWER_XDIGITS[b >> 4];
-    }
   }
   static void set_severity_level(int severity);
   // Returns the severity level by |name|.  Returns -1 if |name| is
   // unknown.
-  static int get_severity_level_by_name(const StringRef &name);
+  static int get_severity_level_by_name(std::string_view name);
   static bool log_enabled(int severity) { return severity >= severity_thres_; }
 
   enum {
@@ -200,24 +214,30 @@ public:
     fmt_hex = 0x01,
   };
 
-  void set_flags(int flags) { flags_ = flags; }
+  void set_flags(uint32_t flags) { flags_ = flags; }
 
 private:
-  size_t rleft() { return last_ - begin_; }
-  size_t wleft() { return end_ - last_; }
-  void update_full() { full_ = last_ == end_; }
+  size_t rleft() { return as_unsigned(last_ - begin_); }
+  size_t wleft() {
+    return as_unsigned(end_ - last_ - /* terminal NUL or LF */ 1);
+  }
+  void update_full() { full_ = wleft() == 0; }
 
   LogBuffer &buf_;
   uint8_t *begin_;
   uint8_t *end_;
   uint8_t *last_;
-  const char *filename_;
+  std::string_view filename_;
   uint32_t flags_;
   int severity_;
-  int linenum_;
+  uint32_t linenum_;
   bool full_;
   static int severity_thres_;
 };
+
+inline auto log_enabled(SeverityLevel severity) {
+  return ENABLE_LOG && Log::log_enabled(severity);
+}
 
 namespace log {
 void hex(Log &log);
@@ -257,6 +277,7 @@ enum class LogFragmentType {
   TLS_CLIENT_ISSUER_NAME,
   TLS_CLIENT_SERIAL,
   TLS_CLIENT_SUBJECT_NAME,
+  TLS_ECH_ACCEPTED,
   BACKEND_HOST,
   BACKEND_PORT,
   METHOD,
@@ -266,20 +287,20 @@ enum class LogFragmentType {
 };
 
 struct LogFragment {
-  LogFragment(LogFragmentType type, StringRef value = ""_sr)
+  LogFragment(LogFragmentType type, std::string_view value = ""sv)
     : type(type), value(std::move(value)) {}
   LogFragmentType type;
-  StringRef value;
+  std::string_view value;
 };
 
 struct LogSpec {
   Downstream *downstream;
-  StringRef remote_addr;
-  StringRef alpn;
-  StringRef sni;
+  std::string_view remote_addr;
+  std::string_view alpn;
+  std::string_view sni;
   SSL *ssl;
   std::chrono::high_resolution_clock::time_point request_end_time;
-  StringRef remote_port;
+  std::string_view remote_port;
   uint16_t server_port;
   pid_t pid;
 };
@@ -315,4 +336,4 @@ int open_log_file(const char *path);
 
 } // namespace shrpx
 
-#endif // SHRPX_LOG_H
+#endif // !defined(SHRPX_LOG_H)

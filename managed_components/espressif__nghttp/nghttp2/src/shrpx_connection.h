@@ -36,15 +36,15 @@
 #ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
 #  include <wolfssl/options.h>
 #  include <wolfssl/openssl/ssl.h>
-#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#else // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 #  include <openssl/ssl.h>
-#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#endif // !defined(NGHTTP2_OPENSSL_IS_WOLFSSL)
 
 #include <nghttp2/nghttp2.h>
 
 #ifdef ENABLE_HTTP3
 #  include <ngtcp2/ngtcp2_crypto.h>
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
 
 #include "shrpx_rate_limit.h"
 #include "shrpx_error.h"
@@ -52,28 +52,14 @@
 
 namespace shrpx {
 
-struct MemcachedRequest;
-
 namespace tls {
 struct TLSSessionCache;
 } // namespace tls
 
-enum class TLSHandshakeState {
-  NORMAL,
-  WAIT_FOR_SESSION_CACHE,
-  GOT_SESSION_CACHE,
-  CANCEL_SESSION_CACHE,
-  WRITE_STARTED,
-};
-
 struct TLSConnection {
-  DefaultMemchunks wbuf;
-  DefaultPeekMemchunks rbuf;
   // Stores TLSv1.3 early data.
   DefaultMemchunks earlybuf;
   SSL *ssl;
-  SSL_SESSION *cached_session;
-  MemcachedRequest *cached_session_lookup_req;
   tls::TLSSessionCache *client_session_cache;
   std::chrono::steady_clock::time_point last_write_idle;
   size_t warmup_writelen;
@@ -81,7 +67,6 @@ struct TLSConnection {
   // required since these functions require the exact same parameters
   // on non-blocking I/O.
   size_t last_writelen, last_readlen;
-  TLSHandshakeState handshake_state;
   bool initial_handshake_done;
   bool reneg_started;
   // true if ssl is prepared to do handshake as server.
@@ -122,7 +107,6 @@ struct Connection {
   void prepare_server_handshake();
 
   int tls_handshake();
-  int tls_handshake_simple();
   int write_tls_pending_handshake();
 
   int check_http2_requirement();
@@ -137,8 +121,8 @@ struct Connection {
   // underlying connection blocks), return 0.  SHRPX_ERR_EOF is
   // returned in case of EOF and no data was read.  Otherwise
   // SHRPX_ERR_NETWORK is return in case of error.
-  nghttp2_ssize write_tls(const void *data, size_t len);
-  nghttp2_ssize read_tls(void *data, size_t len);
+  nghttp2_ssize write_tls(std::span<const uint8_t> data);
+  nghttp2_ssize read_tls(std::span<uint8_t> data);
 
   size_t get_tls_write_limit();
   // Updates the number of bytes written in warm up period.
@@ -147,13 +131,13 @@ struct Connection {
   // determine fallback to short record size mode.
   void start_tls_write_idle();
 
-  nghttp2_ssize write_clear(const void *data, size_t len);
-  nghttp2_ssize writev_clear(struct iovec *iov, int iovcnt);
-  nghttp2_ssize read_clear(void *data, size_t len);
+  nghttp2_ssize write_clear(std::span<const uint8_t> data);
+  nghttp2_ssize writev_clear(std::span<struct iovec> iov);
+  nghttp2_ssize read_clear(std::span<uint8_t> data);
   // Read at most |len| bytes of data from socket without rate limit.
-  nghttp2_ssize read_nolim_clear(void *data, size_t len);
+  nghttp2_ssize read_nolim_clear(std::span<uint8_t> data);
   // Peek at most |len| bytes of data from socket without rate limit.
-  nghttp2_ssize peek_clear(void *data, size_t len);
+  nghttp2_ssize peek_clear(std::span<uint8_t> data);
 
   void handle_tls_pending_read();
 
@@ -175,7 +159,7 @@ struct Connection {
 #ifdef ENABLE_HTTP3
   // This must be the first member of Connection.
   ngtcp2_crypto_conn_ref conn_ref;
-#endif // ENABLE_HTTP3
+#endif // defined(ENABLE_HTTP3)
   TLSConnection tls;
   ev_io wev;
   ev_io rev;
@@ -202,11 +186,8 @@ struct Connection {
 #ifdef ENABLE_HTTP3
 static_assert(std::is_standard_layout<Connection>::value,
               "Connection is not standard layout");
-#endif // ENABLE_HTTP3
-
-// Creates BIO_method shared by all SSL objects.
-BIO_METHOD *create_bio_method();
+#endif // defined(ENABLE_HTTP3)
 
 } // namespace shrpx
 
-#endif // SHRPX_CONNECTION_H
+#endif // !defined(SHRPX_CONNECTION_H)

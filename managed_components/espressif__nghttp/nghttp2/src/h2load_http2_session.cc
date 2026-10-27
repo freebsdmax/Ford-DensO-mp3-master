@@ -50,14 +50,16 @@ int on_header_callback(nghttp2_session *session, const nghttp2_frame *frame,
   if (frame->hd.type != NGHTTP2_HEADERS) {
     return 0;
   }
-  client->on_header(frame->hd.stream_id, name, namelen, value, valuelen);
+  client->on_header(frame->hd.stream_id, {name, namelen}, {value, valuelen});
   client->worker->stats.bytes_head_decomp += namelen + valuelen;
 
   if (client->worker->config->verbose) {
     std::cout << "[stream_id=" << frame->hd.stream_id << "] ";
-    std::cout.write(reinterpret_cast<const char *>(name), namelen);
+    std::cout.write(reinterpret_cast<const char *>(name),
+                    static_cast<std::streamsize>(namelen));
     std::cout << ": ";
-    std::cout.write(reinterpret_cast<const char *>(value), valuelen);
+    std::cout.write(reinterpret_cast<const char *>(value),
+                    static_cast<std::streamsize>(valuelen));
     std::cout << "\n";
   }
 
@@ -168,7 +170,9 @@ nghttp2_ssize send_callback(nghttp2_session *session, const uint8_t *data,
     return NGHTTP2_ERR_WOULDBLOCK;
   }
 
-  return wb.append(data, length);
+  wb.append(data, length);
+
+  return as_signed(length);
 }
 } // namespace
 
@@ -182,7 +186,8 @@ void Http2Session::on_connect() {
 
   nghttp2_session_callbacks_new(&callbacks);
 
-  auto callbacks_deleter = defer(nghttp2_session_callbacks_del, callbacks);
+  auto callbacks_deleter =
+    defer([callbacks] { nghttp2_session_callbacks_del(callbacks); });
 
   nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
                                                        on_frame_recv_callback);
@@ -200,6 +205,8 @@ void Http2Session::on_connect() {
     callbacks, before_frame_send_callback);
 
   nghttp2_session_callbacks_set_send_callback2(callbacks, send_callback);
+
+  nghttp2_session_callbacks_set_rand_callback(callbacks, util::secure_random);
 
   nghttp2_option *opt;
 
@@ -231,7 +238,7 @@ void Http2Session::on_connect() {
   }
   if (config->max_frame_size != 16_k) {
     iv[niv].settings_id = NGHTTP2_SETTINGS_MAX_FRAME_SIZE;
-    iv[niv].value = config->max_frame_size;
+    iv[niv].value = static_cast<uint32_t>(config->max_frame_size);
     ++niv;
   }
 
@@ -272,13 +279,13 @@ int Http2Session::submit_request() {
   return 0;
 }
 
-int Http2Session::on_read(const uint8_t *data, size_t len) {
-  auto rv = nghttp2_session_mem_recv2(session_, data, len);
+int Http2Session::on_read(std::span<const uint8_t> data) {
+  auto rv = nghttp2_session_mem_recv2(session_, data.data(), data.size());
   if (rv < 0) {
     return -1;
   }
 
-  assert(static_cast<size_t>(rv) == len);
+  assert(static_cast<size_t>(rv) == data.size());
 
   if (nghttp2_session_want_read(session_) == 0 &&
       nghttp2_session_want_write(session_) == 0 && client_->wb.rleft() == 0) {
