@@ -1,4 +1,5 @@
 #include "uart_ota_protocol.h"
+#include "player_link.h"
 #include "esp_log.h"
 #include "esp_crc.h"
 #include "driver/uart.h"
@@ -304,8 +305,8 @@ static esp_err_t send_end_command(uint32_t final_crc32)
 /**
  * Основна функція для відправки firmware на slave через UART
  */
-esp_err_t uart_ota_send_firmware(const uint8_t *firmware_data, size_t firmware_size,
-                                  void (*progress_callback)(size_t sent, size_t total))
+static esp_err_t uart_ota_send_firmware_locked(const uint8_t *firmware_data, size_t firmware_size,
+                                               void (*progress_callback)(size_t sent, size_t total))
 {
     if (!firmware_data || firmware_size == 0 || firmware_size > UART_OTA_MAX_SIZE) {
         ESP_LOGE(TAG, "Невірний розмір firmware: %d", (int)firmware_size);
@@ -378,7 +379,7 @@ esp_err_t uart_ota_send_firmware(const uint8_t *firmware_data, size_t firmware_s
                      percent, (int)bytes_sent, (int)firmware_size, last_block);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(1);  // ACK already paces the transfer
     }
 
     ESP_LOGI(TAG, "✅ Всі блоки відправлено: %d блоків, %d байт", block_num, (int)bytes_sent);
@@ -392,4 +393,19 @@ esp_err_t uart_ota_send_firmware(const uint8_t *firmware_data, size_t firmware_s
     
     ESP_LOGI(TAG, "🎉 UART OTA завершено успішно!");
     return ESP_OK;
+}
+
+esp_err_t uart_ota_send_firmware(const uint8_t *firmware_data, size_t firmware_size,
+                                 void (*progress_callback)(size_t sent, size_t total))
+{
+    /* The whole transfer owns the UART: no version polling, no play commands. */
+    if (!uart_link_lock(3000)) {
+        ESP_LOGE(TAG, "UART busy; cannot start OTA");
+        return ESP_ERR_TIMEOUT;
+    }
+    uart_link_set_ota_active(true);
+    esp_err_t err = uart_ota_send_firmware_locked(firmware_data, firmware_size, progress_callback);
+    uart_link_set_ota_active(false);
+    uart_link_unlock();
+    return err;
 }

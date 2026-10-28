@@ -1,0 +1,85 @@
+name: Release firmware
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  ADF_REPO: https://github.com/espressif/esp-adf.git
+  # ESP-ADF commit that matches the local toolchain (git describe: v2.7-173-gfcce23e3)
+  ADF_COMMIT: fcce23e3
+
+jobs:
+  firmware:
+    name: Build ESP32-S3 firmware
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.5.1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch ESP-ADF (pinned)
+        run: |
+          git clone --filter=blob:none "$ADF_REPO" /opt/esp-adf
+          git -C /opt/esp-adf checkout "$ADF_COMMIT"
+          # only the codec library is needed for the audio pipeline
+          git -C /opt/esp-adf submodule update --init components/esp-adf-libs
+
+      - name: Build
+        run: |
+          . "$IDF_PATH/export.sh"
+          export ADF_PATH=/opt/esp-adf
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Package
+        run: |
+          . "$IDF_PATH/export.sh"
+          mkdir -p out
+          cp build/Ford-DensO-mp3-master.bin out/
+          cp build/bootloader/bootloader.bin out/
+          cp build/partition_table/partition-table.bin out/
+          cp build/ota_data_initial.bin out/
+          # single image for esptool write_flash 0x0
+          idf.py merge-bin -o out/Ford-DensO-mp3-master-full.bin
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: master-firmware
+          path: out/*
+
+  release:
+    name: Publish release
+    needs: firmware
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
+          body: |
+            Ford Player — Master firmware (ESP32-S3)
+
+            **Files**
+            - `Ford-DensO-mp3-master-full.bin` — single image, flash at `0x0`
+            - `Ford-DensO-mp3-master.bin` — app image for OTA (app / BLE)
+            - `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` — for manual flashing
+
+            **Flash**
+            ```bash
+            esptool.py --chip esp32s3 -p /dev/ttyUSB0 -b 921600 write_flash 0x0 Ford-DensO-mp3-master-full.bin
+            ```
+            or
+            ```bash
+            idf.py -p /dev/ttyUSB0 flash
+            ```

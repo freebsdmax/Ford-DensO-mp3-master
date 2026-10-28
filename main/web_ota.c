@@ -4,6 +4,9 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include "web_ota.h"
+#include "player_slave.h"
+#include "cJSON.h"
+#include "player_logs.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -488,12 +491,13 @@ static const char *INDEX_HTML =
 "        <option value='5'>Verbose</option>"
 "      </select><br>"
 "      <label><input type='checkbox' id='verbose-logs'> Детальні логи (емодзі та банери)</label><br><br>"
-"      <h4>Логи компонентів:</h4>"
-"      <label><input type='checkbox' id='player-logs' checked> Player</label><br>"
-"      <label><input type='checkbox' id='wifi-can-sniffer-logs' checked> WiFi CAN Sniffer</label><br>"
-"      <label><input type='checkbox' id='web-ota-logs' checked> Web OTA</label><br>"
-"      <label><input type='checkbox' id='uart-ota-logs' checked> UART OTA</label><br>"
-"      <label><input type='checkbox' id='elm327-logs' checked> ELM327</label><br><br>"
+"      <h4>Логи за модулями:</h4>"
+"      <label><input type='checkbox' id='log-player' checked> 🎵 Плеєр (аудіо, плейлист)</label><br>"
+"      <label><input type='checkbox' id='log-connect' checked> 📡 Зв'язок (BLE, Wi-Fi, Slave)</label><br>"
+"      <label><input type='checkbox' id='log-ota' checked> 💾 OTA (веб, UART)</label><br>"
+"      <label><input type='checkbox' id='log-car' checked> 🚗 Авто (CAN, ELM327)</label><br>"
+"      <label><input type='checkbox' id='log-system' checked> ⚙️ Система (USB, сон, консоль, NVS)</label><br><br>"
+
 "      <button class='btn btn-secondary' type='button' onclick='loadSleepSettings(); loadLogLevel(); loadVerboseLogs(); loadComponentLogs()'>Завантажити налаштування</button>"
 "      <button class='btn' type='button' onclick='saveSleepSettings(); saveLogLevel(); saveVerboseLogs(); saveComponentLogs()'>Зберегти налаштування</button>"
 "      <button class='btn btn-danger' type='button' onclick='restartDevice()'>Перезавантажити пристрій</button>"
@@ -503,6 +507,7 @@ static const char *INDEX_HTML =
 "</div>"
 "<div class='tab-content' id='tab-monitoring'>"
 "  <div class='section'><h3>📊 Логи системи</h3>"
+
 "    <pre id='log-output' style='background:#000;color:#0f0;padding:1rem;font-family:monospace;font-size:0.8rem;max-height:400px;overflow-y:auto;white-space:pre-wrap;'></pre>"
 "  </div>"
 "</div>"
@@ -514,6 +519,7 @@ static const char *INDEX_HTML =
 "  tabContents.forEach(tc=>tc.classList.remove('active'));"
 "  tab.classList.add('active');"
 "  document.getElementById('tab-'+tab.dataset.tab).classList.add('active');"
+"  if(tab.dataset.tab==='player'){loadPlaylist();}"
 "  if(tab.dataset.tab==='settings'){loadWifiSettings();loadSleepSettings();loadLogLevel();loadVerboseLogs();loadComponentLogs();}"
 "  if(tab.dataset.tab==='ota'){loadOtaStatus();}"
 "  if(tab.dataset.tab==='monitoring'){updateLogs();}"
@@ -543,6 +549,7 @@ static const char *INDEX_HTML =
 "  }).catch(e=>{console.log('Error loading playlist:',e);});"
 "}"
 "loadPlaylist();"
+"setInterval(()=>{const p=document.getElementById('playlist');const t=document.getElementById('tab-player');if(p&&t&&t.classList.contains('active')&&p.children.length===0){loadPlaylist();}},5000);"
 "function playerCmd(cmd){"
 "  fetch('/player_cmd?cmd='+cmd).then(r=>r.text()).then(t=>{"
 "    document.getElementById('player-status').textContent=t;"
@@ -737,25 +744,24 @@ static const char *INDEX_HTML =
 "}"
 "function loadComponentLogs(){"
 "  fetch('/component_logs').then(r=>r.json()).then(c=>{"
-"    document.getElementById('player-logs').checked = c.player == 1;"
-"    document.getElementById('wifi-can-sniffer-logs').checked = c.wifi_can_sniffer == 1;"
-"    document.getElementById('web-ota-logs').checked = c.web_ota == 1;"
-"    document.getElementById('uart-ota-logs').checked = c.uart_ota == 1;"
-"    document.getElementById('elm327-logs').checked = c.elm327 == 1;"
-"    document.getElementById('sleep-status').textContent = 'Налаштування логів компонентів завантажено';"
-"  }).catch(e=>{document.getElementById('sleep-status').textContent = 'Помилка завантаження логів компонентів'; console.log('Error loading component logs:',e);});"
+"    const g = c.groups || {};"
+"    document.getElementById('log-player').checked = (g.player === 1);"
+"    document.getElementById('log-connect').checked = (g.connect === 1);"
+"    document.getElementById('log-ota').checked = (g.ota === 1);"
+"    document.getElementById('log-car').checked = (g.car === 1);"
+"    document.getElementById('log-system').checked = (g.system === 1);"
+"  }).catch(e=>{console.log('Error loading component logs:',e);});"
 "}"
 "function saveComponentLogs(){"
-"  const data = {"
-"    player: document.getElementById('player-logs').checked ? 1 : 0,"
-"    wifi_can_sniffer: document.getElementById('wifi-can-sniffer-logs').checked ? 1 : 0,"
-"    web_ota: document.getElementById('web-ota-logs').checked ? 1 : 0,"
-"    uart_ota: document.getElementById('uart-ota-logs').checked ? 1 : 0,"
-"    elm327: document.getElementById('elm327-logs').checked ? 1 : 0"
-"  };"
-"  const body = data.player + ' ' + data.wifi_can_sniffer + ' ' + data.web_ota + ' ' + data.uart_ota + ' ' + data.elm327;"
+"  const body = JSON.stringify({groups:{"
+"    player: document.getElementById('log-player').checked ? 1 : 0,"
+"    connect: document.getElementById('log-connect').checked ? 1 : 0,"
+"    ota: document.getElementById('log-ota').checked ? 1 : 0,"
+"    car: document.getElementById('log-car').checked ? 1 : 0,"
+"    system: document.getElementById('log-system').checked ? 1 : 0"
+"  }});"
 "  fetch('/component_logs', {method:'POST', body:body}).then(r=>r.text()).then(t=>{"
-"    document.getElementById('sleep-status').textContent = 'Налаштування логів компонентів збережено';"
+"    document.getElementById('sleep-status').textContent = 'Логи за модулями збережено';"
 "  }).catch(e=>{console.log('Error saving component logs:',e);});"
 "}"
 "function restartDevice(){"
@@ -766,6 +772,7 @@ static const char *INDEX_HTML =
 "  }"
 "}"
 "window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} };"
+"</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>ESP32 Music Player — web control • by your device</footer>"
 
@@ -774,6 +781,8 @@ static const char *INDEX_HTML =
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_hdr(req, "Pragma", "no-cache");
     return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
 }
 
@@ -809,23 +818,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     }
     
     // Оновлюємо версію slave тільки раз в 30 секунд
-    uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS / 1000;
-    if (now - last_version_check > 30 || cached_slave_main_date[0] == '\0') {
-        // Спробуємо отримати версію від slave
-        extern esp_err_t get_slave_version_extended(char *main_date, size_t main_date_len, char *main_time, size_t main_time_len,
-                                                   char *crc_date, size_t crc_date_len, char *crc_time, size_t crc_time_len,
-                                                   char *uart_date, size_t uart_date_len, char *uart_time, size_t uart_time_len);
-        esp_err_t slave_err = get_slave_version_extended(cached_slave_main_date, sizeof(cached_slave_main_date), 
-                                                        cached_slave_main_time, sizeof(cached_slave_main_time),
-                                                        cached_slave_crc_date, sizeof(cached_slave_crc_date),
-                                                        cached_slave_crc_time, sizeof(cached_slave_crc_time),
-                                                        cached_slave_uart_date, sizeof(cached_slave_uart_date),
-                                                        cached_slave_uart_time, sizeof(cached_slave_uart_time));
-        if (slave_err == ESP_OK) {
-            last_version_check = now;
-        }
-    }
-    
+    // Slave versions are refreshed by a background task; reading cache only.
+    slave_version_get(cached_slave_main_date, sizeof(cached_slave_main_date),
+                      cached_slave_main_time, sizeof(cached_slave_main_time),
+                      cached_slave_crc_date, sizeof(cached_slave_crc_date),
+                      cached_slave_crc_time, sizeof(cached_slave_crc_time),
+                      cached_slave_uart_date, sizeof(cached_slave_uart_date),
+                      cached_slave_uart_time, sizeof(cached_slave_uart_time));
+
     char json[1024];
     int len = snprintf(json, sizeof(json),
                        "{\"active\":%s,\"is_uart_slave\":%s,\"total\":%u,\"written\":%u,\"block\":%u,"
@@ -904,7 +904,14 @@ static esp_err_t version_get_handler(httpd_req_t *req)
         nvs_close(nvs_handle);
     }
     ESP_LOGI(TAG, "Web version: %s %s", web_date, web_time);
-    
+
+    slave_version_get(cached_slave_main_date, sizeof(cached_slave_main_date),
+                      cached_slave_main_time, sizeof(cached_slave_main_time),
+                      cached_slave_crc_date, sizeof(cached_slave_crc_date),
+                      cached_slave_crc_time, sizeof(cached_slave_crc_time),
+                      cached_slave_uart_date, sizeof(cached_slave_uart_date),
+                      cached_slave_uart_time, sizeof(cached_slave_uart_time));
+
     char json[512];
     int len = snprintf(json, sizeof(json),
                        "{\"player_build_date\":\"%s\",\"player_build_time\":\"%s\","
@@ -1269,6 +1276,17 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "OTA aborted: received 0 bytes");
         free(firmware_buf);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+        return ESP_FAIL;
+    }
+
+    // Validate ESP firmware magic byte (0xE9)
+    if (firmware_buf[0] != 0xE9) {
+        ESP_LOGE(TAG, "OTA aborted: bad magic 0x%02X (expected 0xE9), first bytes: %02X %02X %02X %02X",
+                 firmware_buf[0], firmware_buf[0], offset>1?firmware_buf[1]:0,
+                 offset>2?firmware_buf[2]:0, offset>3?firmware_buf[3]:0);
+        free(firmware_buf);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "Uploaded data is not an ESP firmware .bin (bad magic 0xE9). Select the correct *.bin file.");
         return ESP_FAIL;
     }
 
@@ -1640,14 +1658,38 @@ static esp_err_t restart_handler(httpd_req_t *req)
 
 static esp_err_t component_logs_get_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "Component logs GET handler called");
-    char buf[256];
-    snprintf(buf, sizeof(buf), "{\"player\":%d,\"wifi_can_sniffer\":%d,\"web_ota\":%d,\"uart_ota\":%d,\"elm327\":%d}",
-             g_player_logs ? 1 : 0,
-             g_wifi_can_sniffer_logs ? 1 : 0,
-             g_web_ota_logs ? 1 : 0,
-             g_uart_ota_logs ? 1 : 0,
-             g_elm327_logs ? 1 : 0);
+    char buf[768];
+    snprintf(buf, sizeof(buf),
+        "{\"groups\":{\"player\":%d,\"connect\":%d,\"ota\":%d,\"car\":%d,\"system\":%d},"
+        "\"group_player\":%d,\"group_connect\":%d,\"group_ota\":%d,\"group_car\":%d,\"group_system\":%d,"
+        "\"player\":%d,\"wifi_can_sniffer\":%d,\"web_ota\":%d,\"uart_ota\":%d,\"elm327\":%d,"
+        "\"pipeline\":%d,\"can\":%d,\"usb\":%d,\"ble\":%d,\"wifi\":%d,"
+        "\"sleep\":%d,\"playlist\":%d,\"console\":%d,\"link\":%d,\"nvs\":%d}",
+        player_logs_group_get(LOG_GROUP_PLAYER) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_CONNECT) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_OTA) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_CAR) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_SYSTEM) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_PLAYER) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_CONNECT) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_OTA) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_CAR) ? 1 : 0,
+        player_logs_group_get(LOG_GROUP_SYSTEM) ? 1 : 0,
+        g_player_logs ? 1 : 0,
+        g_wifi_can_sniffer_logs ? 1 : 0,
+        g_web_ota_logs ? 1 : 0,
+        g_uart_ota_logs ? 1 : 0,
+        g_elm327_logs ? 1 : 0,
+        g_log_pipeline ? 1 : 0,
+        g_log_can ? 1 : 0,
+        g_log_usb ? 1 : 0,
+        g_log_ble ? 1 : 0,
+        g_log_wifi ? 1 : 0,
+        g_log_sleep ? 1 : 0,
+        g_log_playlist ? 1 : 0,
+        g_log_console ? 1 : 0,
+        g_log_link ? 1 : 0,
+        g_log_nvs ? 1 : 0);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, buf, strlen(buf));
     return ESP_OK;
@@ -1655,56 +1697,118 @@ static esp_err_t component_logs_get_handler(httpd_req_t *req)
 
 static esp_err_t component_logs_post_handler(httpd_req_t *req)
 {
-    ESP_LOGI(TAG, "Component logs POST handler called");
-    char buf[256];
+    char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
     if (ret <= 0) {
-        ESP_LOGE(TAG, "httpd_req_recv failed: %d", ret);
         return ESP_FAIL;
     }
     buf[ret] = '\0';
-    ESP_LOGI(TAG, "Received component logs buf: %s", buf);
-    // Parse plain text
-    int player, wifi, web, uart, elm327;
-    if (sscanf(buf, "%d %d %d %d %d", &player, &wifi, &web, &uart, &elm327) != 5) {
-        ESP_LOGE(TAG, "Failed to parse component logs");
-        return ESP_FAIL;
+
+    int player=1, wifi=1, web=1, uart=1, elm=1;
+    int pipeline=1, can=1, usb=1, ble=1, wifi_mod=1, sleep_mod=1, playlist=1, console=1, link=1, nvs_mod=1;
+    bool use_groups = false;
+    if (buf[0] == '{') {
+        cJSON *j = cJSON_Parse(buf);
+        if (!j) return ESP_FAIL;
+
+        const cJSON *groups = cJSON_GetObjectItemCaseSensitive(j, "groups");
+        if (cJSON_IsObject(groups)) {
+            for (int g = 0; g < LOG_GROUP_COUNT; g++) {
+                const cJSON *it = cJSON_GetObjectItemCaseSensitive(groups, player_logs_group_key(g));
+                if (cJSON_IsNumber(it)) player_logs_group_set(g, it->valueint != 0);
+            }
+            use_groups = true;
+        } else {
+            /* Android client sends flat group_* keys together with legacy ones. */
+            for (int g = 0; g < LOG_GROUP_COUNT; g++) {
+                char gkey[24];
+                snprintf(gkey, sizeof(gkey), "group_%s", player_logs_group_key(g));
+                const cJSON *it = cJSON_GetObjectItemCaseSensitive(j, gkey);
+                if (cJSON_IsNumber(it)) {
+                    use_groups = true;
+                }
+            }
+        }
+        #define JI(key, dst) do { const cJSON *it = cJSON_GetObjectItemCaseSensitive(j, key); if (cJSON_IsNumber(it)) dst = it->valueint; } while (0)
+        JI("player", player);
+        JI("wifi_can_sniffer", wifi);
+        JI("web_ota", web);
+        JI("uart_ota", uart);
+        JI("elm327", elm);
+        JI("pipeline", pipeline);
+        JI("can", can);
+        JI("usb", usb);
+        JI("ble", ble);
+        JI("wifi", wifi_mod);
+        JI("sleep", sleep_mod);
+        JI("playlist", playlist);
+        JI("console", console);
+        JI("link", link);
+        JI("nvs", nvs_mod);
+        #undef JI
+        if (!use_groups) {
+            for (int g = 0; g < LOG_GROUP_COUNT; g++) {
+                char gkey[24];
+                snprintf(gkey, sizeof(gkey), "group_%s", player_logs_group_key(g));
+                const cJSON *it = cJSON_GetObjectItemCaseSensitive(j, gkey);
+                if (cJSON_IsNumber(it)) player_logs_group_set(g, it->valueint != 0);
+            }
+        }
+        cJSON_Delete(j);
+    } else {
+        int n = sscanf(buf, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+            &player, &wifi, &web, &uart, &elm,
+            &pipeline, &can, &usb, &ble, &wifi_mod,
+            &sleep_mod, &playlist, &console, &link, &nvs_mod);
+        if (n < 5) {
+            return ESP_FAIL;
+        }
+        if (n < 15) {
+            pipeline=can=usb=ble=wifi_mod=sleep_mod=playlist=console=link=nvs_mod=1;
+        }
     }
-    ESP_LOGI(TAG, "Parsed component logs: player=%d, wifi=%d, web=%d, uart=%d, elm=%d", player, wifi, web, uart, elm327);
-    g_player_logs = (player != 0);
-    g_wifi_can_sniffer_logs = (wifi != 0);
-    g_web_ota_logs = (web != 0);
-    g_uart_ota_logs = (uart != 0);
-    g_elm327_logs = (elm327 != 0);
-    // save to NVS
-    ESP_LOGI(TAG, "Saving component logs to NVS: player=%d, wifi=%d, web=%d, uart=%d, elm=%d", g_player_logs, g_wifi_can_sniffer_logs, g_web_ota_logs, g_uart_ota_logs, g_elm327_logs);
+
+    if (!use_groups) {
+        g_player_logs = (player != 0);
+        g_wifi_can_sniffer_logs = (wifi != 0);
+        g_web_ota_logs = (web != 0);
+        g_uart_ota_logs = (uart != 0);
+        g_elm327_logs = (elm != 0);
+
+        g_log_pipeline = (pipeline != 0);
+        g_log_can = (can != 0);
+        g_log_usb = (usb != 0);
+        g_log_ble = (ble != 0);
+        g_log_wifi = (wifi_mod != 0);
+        g_log_sleep = (sleep_mod != 0);
+        g_log_playlist = (playlist != 0);
+        g_log_console = (console != 0);
+        g_log_link = (link != 0);
+        g_log_nvs = (nvs_mod != 0);
+    }
+
+    player_logs_save();
+    player_logs_apply();
+
     nvs_handle_t nvs_handle;
     if (nvs_open("audio_player", NVS_READWRITE, &nvs_handle) == ESP_OK) {
-        ESP_LOGI(TAG, "NVS opened for component logs save");
-        esp_err_t err;
-        err = nvs_set_u8(nvs_handle, "player_logs", g_player_logs ? 1 : 0);
-        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 player_logs failed: %s", esp_err_to_name(err));
-        err = nvs_set_u8(nvs_handle, "wifi_logs", g_wifi_can_sniffer_logs ? 1 : 0);
-        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 wifi_logs failed: %s", esp_err_to_name(err));
-        err = nvs_set_u8(nvs_handle, "web_ota_logs", g_web_ota_logs ? 1 : 0);
-        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 web_ota_logs failed: %s", esp_err_to_name(err));
-        err = nvs_set_u8(nvs_handle, "uart_ota_logs", g_uart_ota_logs ? 1 : 0);
-        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 uart_ota_logs failed: %s", esp_err_to_name(err));
-        err = nvs_set_u8(nvs_handle, "elm327_logs", g_elm327_logs ? 1 : 0);
-        if (err != ESP_OK) ESP_LOGE(TAG, "nvs_set_u8 elm327_logs failed: %s", esp_err_to_name(err));
-        if (nvs_commit(nvs_handle) == ESP_OK) {
-            ESP_LOGI(TAG, "NVS committed for component logs");
-        } else {
-            ESP_LOGE(TAG, "NVS commit failed for component logs");
-        }
+        nvs_set_u8(nvs_handle, "player_logs", g_player_logs ? 1 : 0);
+        nvs_set_u8(nvs_handle, "wifi_logs", g_wifi_can_sniffer_logs ? 1 : 0);
+        nvs_set_u8(nvs_handle, "web_ota_logs", g_web_ota_logs ? 1 : 0);
+        nvs_set_u8(nvs_handle, "uart_ota_logs", g_uart_ota_logs ? 1 : 0);
+        nvs_set_u8(nvs_handle, "elm327_logs", g_elm327_logs ? 1 : 0);
+        nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
-    } else {
-        ESP_LOGE(TAG, "Failed to open NVS for component logs save");
     }
+
+    esp_log_level_set("Player", g_player_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+    esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+    esp_log_level_set("UART_OTA_MASTER", g_uart_ota_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+    esp_log_level_set("ELM327_WIFI", g_elm327_logs ? ESP_LOG_INFO : ESP_LOG_NONE);
+
     httpd_resp_sendstr(req, "OK");
     return ESP_OK;
 }
-
 
 static esp_err_t elm327_config_get_handler(httpd_req_t *req)
 {
