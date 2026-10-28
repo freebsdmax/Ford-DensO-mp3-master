@@ -18,8 +18,8 @@ static const char *TAG = "BLE_Player";
 #define PLAYER_PROFILE_NUM 1
 #define PLAYER_PROFILE_APP_ID 0
 #define PLAYER_SVC_INST_ID 0
-#define BLE_RPC_QUEUE_LENGTH 3
-#define BLE_RPC_REQUEST_SIZE 500
+#define BLE_RPC_QUEUE_LENGTH 8
+#define BLE_RPC_REQUEST_SIZE 1200
 
 typedef struct {
     esp_gatt_if_t gatts_if;
@@ -81,6 +81,13 @@ static ble_rpc_callback_t g_rpc_callback = NULL;
 static QueueHandle_t g_rpc_queue = NULL;
 
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+
+#define OTA_FRAME_MAGIC 0xA5
+#define OTA_FRAME_DATA  0x01
+#define OTA_FRAME_HDR   8
+
+static ble_ota_frame_callback_t s_ota_frame_cb = NULL;
+static int s_ota_frame_errors = 0;
 
 static struct gatts_profile_inst player_profile_tab[PLAYER_PROFILE_NUM] = {
     [PLAYER_PROFILE_APP_ID] = {
@@ -212,7 +219,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             esp_ble_gatts_add_char(player_profile_tab[PLAYER_PROFILE_APP_ID].service_handle,
                                    &cmd_uuid,
                                    ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                   ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE,
+                                   ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR,
                                    NULL, NULL);
             break;
 
@@ -282,6 +289,10 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         case ESP_GATTS_CONNECT_EVT:
             ESP_LOGI(TAG, "✅ BLE client connected, conn_id=%d", param->connect.conn_id);
             player_profile_tab[PLAYER_PROFILE_APP_ID].conn_id = param->connect.conn_id;
+            // Prefer LE 2M PHY for faster transfers (BLE 5)
+            esp_ble_gap_set_preferred_phy(param->connect.remote_bda, 0,
+                                          ESP_BLE_GAP_PHY_2M, ESP_BLE_GAP_PHY_2M,
+                                          ESP_BLE_GAP_PHY_OPTIONS_NO_PREF);
             
             // Продовжити рекламу для видимості іншим пристроям
             esp_ble_gap_start_advertising(&(esp_ble_adv_params_t){
@@ -307,12 +318,65 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             break;
 
         case ESP_GATTS_WRITE_EVT:
+            if (param->write.handle == player_profile_tab[PLAYER_PROFILE_APP_ID].char_handle_cmd &&
+                param->write.len >= OTA_FRAME_HDR &&
+                param->write.value[0] == OTA_FRAME_MAGIC) {
+                const uint8_t *v = param->write.value;
+                uint32_t off = (uint32_t)v[2] | ((uint32_t)v[3] << 8) |
+                               ((uint32_t)v[4] << 16) | ((uint32_t)v[5] << 24);
+                size_t len = (size_t)v[6] | ((size_t)v[7] << 8);
+                bool ok = false;
+                if (v[1] != OTA_FRAME_DATA) {
+                    if (s_ota_frame_errors++ < 10) {
+                        ESP_LOGW(TAG, "OTA frame: unknown type 0x%02X", v[1]);
+                    }
+                } else if (len == 0 || len + OTA_FRAME_HDR > param->write.len) {
+                    if (s_ota_frame_errors++ < 10) {
+                        ESP_LOGW(TAG, "OTA frame: bad length %u (write %u)",
+                                 (unsigned)len, (unsigned)param->write.len);
+                    }
+                } else if (s_ota_frame_cb == NULL) {
+                    if (s_ota_frame_errors++ < 10) {
+                        ESP_LOGW(TAG, "OTA frame: no handler registered");
+                    }
+                } else {
+                    ok = s_ota_frame_cb(off, v + OTA_FRAME_HDR, len);
+                    if (!ok && s_ota_frame_errors++ < 10) {
+                        ESP_LOGW(TAG, "OTA frame rejected: off=%u len=%u",
+                                 (unsigned)off, (unsigned)len);
+                    }
+                }
+                if (param->write.need_rsp) {
+                    esp_gatt_rsp_t rsp = {0};
+                    rsp.attr_value.handle = param->write.handle;
+                    rsp.attr_value.len = 0;
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                                param->write.trans_id,
+                                                ok ? ESP_GATT_OK : ESP_GATT_INVALID_ATTR_LEN, &rsp);
+                }
+                break;
+            }
             if (param->write.handle == player_profile_tab[PLAYER_PROFILE_APP_ID].char_handle_cmd) {
                 //ESP_LOGI(TAG, "BLE command write received: %u bytes", (unsigned)param->write.len);
                 esp_gatt_status_t write_status = ESP_GATT_OK;
 
-                char cmd[BLE_RPC_REQUEST_SIZE + 1] = {0};
-                size_t copy_len = param->write.len < sizeof(cmd) - 1 ? param->write.len : sizeof(cmd) - 1;
+                // Long writes arrive as prepared fragments; without reassembly they look
+                // like broken commands. Log them so the app side can be diagnosed.
+                if (param->write.is_prep) {
+                    ESP_LOGW(TAG, "prepared BLE write: %u bytes (long write fragment)",
+                             (unsigned)param->write.len);
+                } else if (param->write.len > 0 &&
+                           strncmp((const char *)param->write.value, "rpc:file.data", 13) == 0 &&
+                           (param->write.len < 120 || param->write.len > 480)) {
+                    ESP_LOGW(TAG, "file.data write: %u bytes (mtu-limited write is ~509 max)",
+                             (unsigned)param->write.len);
+                }
+
+                // Static: a ~1.2 KB buffer on the Bluedroid callback stack is too much.
+                static char s_cmd[BLE_RPC_REQUEST_SIZE + 1];
+                memset(s_cmd, 0, sizeof(s_cmd));
+                char *cmd = s_cmd;
+                size_t copy_len = param->write.len < sizeof(s_cmd) - 1 ? param->write.len : sizeof(s_cmd) - 1;
                 memcpy(cmd, param->write.value, copy_len);
                 while (copy_len > 0 && (cmd[copy_len - 1] == '\r' || cmd[copy_len - 1] == '\n')) {
                     cmd[--copy_len] = '\0';
@@ -527,4 +591,9 @@ void ble_player_set_playlist_callback(ble_playlist_callback_t callback)
 void ble_player_set_rpc_callback(ble_rpc_callback_t callback)
 {
     g_rpc_callback = callback;
+}
+
+void ble_player_set_ota_frame_handler(ble_ota_frame_callback_t callback)
+{
+    s_ota_frame_cb = callback;
 }

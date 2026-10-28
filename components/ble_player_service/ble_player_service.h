@@ -5,6 +5,7 @@
 #include <esp_gap_ble_api.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * @brief Status структура для BLE
@@ -32,6 +33,14 @@ typedef size_t (*ble_playlist_callback_t)(char *buffer, size_t buffer_size);
 typedef size_t (*ble_rpc_callback_t)(const char *request, char *response, size_t response_size);
 
 /**
+ * @brief Binary OTA frame: [0xA5][0x01][offset:4 LE][len:2 LE][data]
+ *
+ * Sent with Write Without Response, so no GATT reply is produced.
+ * @return true when the frame was stored.
+ */
+typedef bool (*ble_ota_frame_callback_t)(uint32_t offset, const uint8_t *data, size_t len);
+
+/**
  * @brief Ініціалізація BLE Player Service
  * @return ESP_OK на успіх
  */
@@ -50,6 +59,7 @@ void ble_player_start_periodic_status(ble_status_callback_t callback, int interv
 /** @brief Установить callback для получения текущего плейлиста */
 void ble_player_set_playlist_callback(ble_playlist_callback_t callback);
 void ble_player_set_rpc_callback(ble_rpc_callback_t callback);
+void ble_player_set_ota_frame_handler(ble_ota_frame_callback_t callback);
 
 // Advertising параметри
 #define PROFILE_NUM 1

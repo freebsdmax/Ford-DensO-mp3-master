@@ -1,4 +1,18 @@
 build/
 android_app/
 AndroidPlayer/
-build/
+# Build artifacts
+*.obj
+*.class
+*.dex
+*.a
+*.bin
+*.cmake
+*.tab
+*.tab_i
+*.len
+*.at
+.gradle/
+.idea/
+# Temp scripts
+tmp_scripts/
