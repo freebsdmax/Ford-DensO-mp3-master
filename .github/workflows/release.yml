@@ -39,6 +39,17 @@ jobs:
           # audio_recorder requires esp-sr, so both submodules are needed
           git -C /opt/esp-adf submodule update --init components/esp-adf-libs components/esp-sr
 
+      - name: Apply ESP-ADF FreeRTOS patch
+        run: |
+          # ADF audio_thread.c uses xTaskCreateRestrictedPinnedToCore(),
+          # which only exists after applying this patch to ESP-IDF.
+          # Without it: "Not found right xTaskCreateRestrictedPinnedToCore"
+          #             -> decoder never starts -> every MP3 is skipped.
+          cd "$IDF_PATH"
+          git apply /opt/esp-adf/idf_patches/idf_v5.5_freertos.patch
+          grep -q xTaskCreateRestrictedPinnedToCore \
+            components/freertos/esp_additions/freertos_tasks_c_additions.h
+
       - name: Build
         run: |
           source "$IDF_PATH/export.sh"
