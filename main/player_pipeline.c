@@ -698,7 +698,9 @@ void analyze_mp3_file(const char *filename) {
     int sample_rate = sample_rates[sample_rate_index];
     
     // Валідація MP3 заголовка
-    if (bitrate == 0 || sample_rate == 0 || version > 2 || layer != 1) {
+    /* version index: 3=MPEG1, 2=MPEG2, 0=MPEG2.5, 1=reserved
+       layer index:   1=Layer III, 2=Layer II, 3=Layer I */
+    if (bitrate == 0 || sample_rate == 0 || version == 1 || layer == 0) {
         ESP_LOGW(TAG_PIPE, "⚠️ Недійсний MP3 заголовок (bitrate=%d, sample_rate=%d, version=%d, layer=%d)", 
                  bitrate, sample_rate, version, layer);
         ESP_LOGW(TAG_PIPE, "🔍 Спробуємо знайти наступний MP3 фрейм...");
@@ -717,7 +719,7 @@ void analyze_mp3_file(const char *filename) {
                 int test_bitrate = bitrates[test_bitrate_idx];
                 int test_sample_rate = sample_rates[test_sample_rate_idx];
                 
-                if (test_bitrate > 0 && test_sample_rate > 0 && test_version <= 2 && test_layer == 1) {
+                if (test_bitrate > 0 && test_sample_rate > 0 && test_version != 1 && test_layer != 0) {
                     next_mp3_offset = i;
                     ESP_LOGI(TAG_PIPE, "✅ Знайдено валідний MP3 фрейм на позиції: %d байт", next_mp3_offset);
                     break;
