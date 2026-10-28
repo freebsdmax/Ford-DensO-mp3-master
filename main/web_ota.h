@@ -9,6 +9,13 @@ extern bool g_web_ota_logs;
 extern bool g_uart_ota_logs;
 extern bool g_elm327_logs;
 
+extern bool g_verbose_logs;
+extern bool g_player_logs;
+extern bool g_wifi_can_sniffer_logs;
+extern bool g_web_ota_logs;
+extern bool g_uart_ota_logs;
+extern bool g_elm327_logs;
+
 esp_err_t web_ota_start(void);
 void web_ota_stop(void);
 size_t web_ota_copy_logs(char *buffer, size_t buffer_size);
