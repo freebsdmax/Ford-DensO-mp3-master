@@ -46,6 +46,7 @@ esp_err_t start_external_input(void);
 void stop_playback_and_services(void);
 void wakeup_from_sleep(void);
 void player_control(const char *cmd, int track);
+esp_err_t get_slave_fw_version(char *buf, size_t len);
 esp_err_t get_slave_version_extended(char *main_date, size_t main_date_len, char *main_time, size_t main_time_len, char *crc_date, size_t crc_date_len, char *crc_time, size_t crc_time_len, char *uart_date, size_t uart_date_len, char *uart_time, size_t uart_time_len);
 void i2s_passthrough_task(void *pvParameters);
 void player_task(void *pvParam);

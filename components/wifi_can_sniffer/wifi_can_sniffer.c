@@ -46,6 +46,7 @@ static uint32_t g_stat_time = 0;
 // Forward declaration
 static void flush_udp_buffer(void);
 static void start_sniffer_now(void);
+static void refresh_destination(void);
 static bool g_started = false;
 
 /**
@@ -63,11 +64,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_AP_STAIPASSIGNED) {
         ip_event_ap_staipassigned_t *ev = (ip_event_ap_staipassigned_t *)event_data;
         ESP_LOGI(TAG, "IP assigned: " IPSTR, IP2STR(&ev->ip));
-        // For AP mode, set broadcast to 192.168.4.255
-        g_pc_addr.sin_family = AF_INET;
-        g_pc_addr.sin_port = htons(g_config.udp_port);
-        g_pc_addr.sin_addr.s_addr = inet_addr("192.168.4.255");
-        ESP_LOGI(TAG, "Broadcast address set to: 192.168.4.255:%d", ntohs(g_pc_addr.sin_port));
+        refresh_destination();
         // Start sniffer now if not already started and sniffer was explicitly enabled
         if (g_enabled) start_sniffer_now();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_CONNECTED) {
@@ -80,15 +77,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "STA got IP: " IPSTR ", netmask: " IPSTR ", gw: " IPSTR,
                  IP2STR(&ev->ip_info.ip), IP2STR(&ev->ip_info.netmask), IP2STR(&ev->ip_info.gw));
 
-        // Use first three octets + .255 as broadcast address (force x.y.z.255)
-        uint32_t ip_net = ev->ip_info.ip.addr; // network byte order
-        uint32_t ip_host = ntohl(ip_net);
-        uint32_t bcast_host = (ip_host & 0xFFFFFF00u) | 0x000000FFu;
-        g_pc_addr.sin_family = AF_INET;
-        g_pc_addr.sin_port = htons(g_config.udp_port);
-        g_pc_addr.sin_addr.s_addr = htonl(bcast_host);
-
-        ESP_LOGI(TAG, "Broadcast address forced to .255: %s:%d", inet_ntoa(g_pc_addr.sin_addr), ntohs(g_pc_addr.sin_port));
+        refresh_destination();
         // Start sniffer now if not already started and sniffer was explicitly enabled
         if (g_enabled) start_sniffer_now();
     }
@@ -461,8 +450,50 @@ static void flush_udp_buffer(void)
     }
 }
 
+/**
+ * @brief Pick the UDP destination.
+ *
+ *   1. STA subnet broadcast  (device joined a home network -> PC is there);
+ *   2. AP subnet broadcast   192.168.4.255;
+ *   3. configured pc_ip_str.
+ * The address used to be hard-coded to 192.168.4.255, so in STA mode the
+ * datagrams never reached the PC.
+ */
+static void refresh_destination(void)
+{
+    esp_netif_ip_info_t info;
+
+    g_pc_addr.sin_family = AF_INET;
+    g_pc_addr.sin_port = htons(g_config.udp_port);
+
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta && esp_netif_get_ip_info(sta, &info) == ESP_OK &&
+        info.ip.addr != 0 && info.netmask.addr != 0) {
+        uint32_t ip = ntohl(info.ip.addr);
+        uint32_t mask = ntohl(info.netmask.addr);
+        g_pc_addr.sin_addr.s_addr = htonl((ip & mask) | ~mask);
+        ESP_LOGI(TAG, "UDP destination: STA broadcast %s:%u",
+                 inet_ntoa(g_pc_addr.sin_addr), ntohs(g_pc_addr.sin_port));
+        return;
+    }
+
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (ap && esp_netif_get_ip_info(ap, &info) == ESP_OK && info.ip.addr != 0) {
+        g_pc_addr.sin_addr.s_addr = inet_addr("192.168.4.255");
+        ESP_LOGI(TAG, "UDP destination: AP broadcast %s:%u",
+                 inet_ntoa(g_pc_addr.sin_addr), ntohs(g_pc_addr.sin_port));
+        return;
+    }
+
+    g_pc_addr.sin_addr.s_addr = inet_addr(g_config.pc_ip_str ? g_config.pc_ip_str : "192.168.4.255");
+    ESP_LOGI(TAG, "UDP destination: configured %s:%u",
+             inet_ntoa(g_pc_addr.sin_addr), ntohs(g_pc_addr.sin_port));
+}
+
 static void start_sniffer_now(void)
 {
+    /* destination depends on the network we are actually on (AP or STA) */
+    refresh_destination();
     if (g_started) return;
     g_started = true;
 
@@ -580,9 +611,7 @@ esp_err_t wifi_can_sniffer_init(const wifi_can_sniffer_config_t *config)
 
     // If AP already exists, set broadcast and start immediately
     if (ap_netif) {
-        g_pc_addr.sin_family = AF_INET;
-        g_pc_addr.sin_port = htons(g_config.udp_port);
-        g_pc_addr.sin_addr.s_addr = inet_addr("192.168.4.255");
+        refresh_destination();
         g_pc_connected = true;
         ESP_LOGI(TAG, "AP present at init; sniffer will start only if enabled via web/init");
     } else {

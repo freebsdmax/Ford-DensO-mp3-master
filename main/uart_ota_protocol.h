@@ -36,7 +36,8 @@
 #define UART_CMD_PREV_TRACK        0x05  // Попередній трек
 #define UART_CMD_GET_VERSION       0x06
 #define UART_CMD_PLAY              0x07  /* AVRCP play  (external/BT mode) */
-#define UART_CMD_PAUSE             0x08  /* AVRCP pause (external/BT mode) */  // Отримати версію збірки
+#define UART_CMD_PAUSE             0x08
+#define UART_CMD_GET_FW_VER        0x09  /* firmware version: resp [0xAA][0x09][len][chars] */  /* AVRCP pause (external/BT mode) */  // Отримати версію збірки
 
 // ============ НАЛАШТУВАННЯ ============
 #define UART_OTA_BLOCK_SIZE        240   // Розмір блоку даних (без заголовків)

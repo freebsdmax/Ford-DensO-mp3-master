@@ -148,6 +148,49 @@ void stop_playback(void) {
 #include "player_wifi.h"
 #include "uart_ota_protocol.h"
 #include "player_link.h"
+
+/**
+ * @brief Ask the slave for its firmware version (UART command 0x09).
+ * Reply: [0xAA][0x09][len][chars...]
+ */
+esp_err_t get_slave_fw_version(char *buf, size_t len)
+{
+    if (!buf || len < 2) return ESP_ERR_INVALID_ARG;
+    buf[0] = '\0';
+
+    if (uart_link_ota_active()) return ESP_ERR_INVALID_STATE;
+    if (!uart_link_lock(1000)) return ESP_ERR_INVALID_STATE;
+
+    esp_err_t err = ESP_OK;
+    uart_flush_input(MASTER_UART_PORT);
+
+    uint8_t req[2] = {UART_CMD_PREFIX_NORMAL, UART_CMD_GET_FW_VER};
+    if (uart_write_bytes(MASTER_UART_PORT, (const char *)req, 2) != 2) {
+        err = ESP_FAIL;
+    } else {
+        uint8_t hdr[3];
+        int r = uart_read_bytes(MASTER_UART_PORT, hdr, 3, pdMS_TO_TICKS(600));
+        if (r != 3 || hdr[0] != UART_CMD_PREFIX_NORMAL || hdr[1] != UART_CMD_GET_FW_VER) {
+            err = ESP_ERR_TIMEOUT;
+        } else {
+            size_t n = hdr[2];
+            if (n > len - 1) n = len - 1;
+            if (n > 0) {
+                int got = uart_read_bytes(MASTER_UART_PORT, (uint8_t *)buf, n, pdMS_TO_TICKS(600));
+                if (got != (int)n) {
+                    err = ESP_ERR_TIMEOUT;
+                    buf[0] = '\0';
+                } else {
+                    buf[n] = '\0';
+                }
+            }
+        }
+    }
+
+    uart_link_unlock();
+    return err;
+}
+
 #include "driver/uart.h"
 #include "player_can.h"
 #include "player_sleep.h"
