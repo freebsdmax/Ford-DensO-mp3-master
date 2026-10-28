@@ -912,20 +912,25 @@ static esp_err_t version_get_handler(httpd_req_t *req)
                       cached_slave_uart_date, sizeof(cached_slave_uart_date),
                       cached_slave_uart_time, sizeof(cached_slave_uart_time));
 
-    char json[512];
+    char slave_fw[32] = "unknown";
+    slave_fw_version_get(slave_fw, sizeof(slave_fw));
+
+    char json[640];
     int len = snprintf(json, sizeof(json),
                        "{\"player_build_date\":\"%s\",\"player_build_time\":\"%s\","
                        "\"web_build_date\":\"%s\",\"web_build_time\":\"%s\","
                        "\"uart_build_date\":\"%s\",\"uart_build_time\":\"%s\","
                        "\"slave_main_build_date\":\"%s\",\"slave_main_build_time\":\"%s\","
                        "\"slave_crc_build_date\":\"%s\",\"slave_crc_build_time\":\"%s\","
-                       "\"slave_uart_build_date\":\"%s\",\"slave_uart_build_time\":\"%s\"}",
+                       "\"slave_uart_build_date\":\"%s\",\"slave_uart_build_time\":\"%s\","
+                       "\"slave_fw_version\":\"%s\"}",
                        player_date, player_time,
                        web_date, web_time,
                        uart_date, uart_time,
                        cached_slave_main_date, cached_slave_main_time,
                        cached_slave_crc_date, cached_slave_crc_time,
-                       cached_slave_uart_date, cached_slave_uart_time);
+                       cached_slave_uart_date, cached_slave_uart_time,
+                       slave_fw);
     
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, len);

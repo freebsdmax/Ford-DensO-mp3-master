@@ -690,10 +690,9 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         cJSON_AddStringToObject(root, "uart_build_time", uart_time);
         char smd[12], smt[9], scd[12], sct[9], sud[12], sut[9];
         slave_version_get(smd, sizeof(smd), smt, sizeof(smt), scd, sizeof(scd), sct, sizeof(sct), sud, sizeof(sud), sut, sizeof(sut));
-            char sfw[32] = "unknown";
-        if (get_slave_fw_version(sfw, sizeof(sfw)) != ESP_OK || sfw[0] == '\0') {
-            strlcpy(sfw, "unknown", sizeof(sfw));
-        }
+        char sfw[32] = "unknown";
+        slave_fw_version_get(sfw, sizeof(sfw));
+        if (sfw[0] == '\0') strlcpy(sfw, "unknown", sizeof(sfw));
         cJSON_AddStringToObject(root, "slave_fw_version", sfw);
         cJSON_AddStringToObject(root, "slave_main_build_date", smd);
         cJSON_AddStringToObject(root, "slave_main_build_time", smt);
