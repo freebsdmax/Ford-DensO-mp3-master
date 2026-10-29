@@ -11,6 +11,18 @@
 | **Slave** | `Ford-DensO-bluetooth-slave` | ESP32 A2DP/HFP-приймач, віддає звук по I2S, керується по UART |
 | **App** | `AndroidPlayer/` | Android-застосунок (BLE-only): плеєр, плейлист, OTA, логи |
 
+
+## Довідка та пов'язані репозиторії
+
+| Компонент | Репозиторій |
+|---|---|
+| Master (ESP32-S3) | https://github.com/freebsdmax/Ford-DensO-mp3-master |
+| Slave (ESP32 Bluetooth) | https://github.com/freebsdmax/Ford-DensO-bluetooth-slave |
+| Android-застосунок | https://github.com/freebsdmax/Esp32_Android_app |
+
+- Повна довідка по системі: [HELP.md](https://github.com/freebsdmax/Ford-DensO-mp3-master/blob/debug/HELP.md)
+- Довідка цього компонента: [HELP.md](HELP.md)
+
 ---
 
 ## Залізо
