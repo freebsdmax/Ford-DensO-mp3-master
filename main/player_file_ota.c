@@ -1,4 +1,5 @@
 #include "player_file_ota.h"
+#include "player_storage.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -21,6 +22,8 @@ static volatile int s_state = FILE_OTA_IDLE;
 static volatile int s_target = FILE_OTA_TARGET_NONE;
 static const esp_partition_t *s_part = NULL;
 static char s_error[48] = "";
+static char s_store_name[32] = "";
+static bool s_delete_after = false;
 static int s_reject_logs = 0;
 
 static void set_error(const char *msg)
@@ -93,6 +96,9 @@ static void apply_task(void *arg)
                 if (err == ESP_OK) err = esp_ota_set_boot_partition(upd);
             }
             if (err == ESP_OK) {
+                if (s_delete_after && s_store_name[0]) {
+                    player_storage_delete_file(s_store_name);
+                }
                 ESP_LOGI(TAG, "Master OTA applied, restarting");
                 s_state = FILE_OTA_DONE;
                 vTaskDelay(pdMS_TO_TICKS(500));
@@ -110,6 +116,9 @@ static void apply_task(void *arg)
         ESP_LOGE(TAG, "File OTA apply failed: %s", esp_err_to_name(err));
         s_state = FILE_OTA_ERROR;
     } else {
+        if (s_delete_after && s_store_name[0]) {
+            player_storage_delete_file(s_store_name);
+        }
         if (s_state != FILE_OTA_DONE) s_state = FILE_OTA_DONE;
         ESP_LOGI(TAG, "File OTA finished (target=%d)", s_target);
     }
@@ -135,10 +144,12 @@ esp_err_t file_ota_begin(size_t total_size, int target)
         set_error("invalid firmware size");
         return ESP_ERR_INVALID_SIZE;
     }
-    if (target != FILE_OTA_TARGET_MASTER && target != FILE_OTA_TARGET_SLAVE) {
+    if (target != FILE_OTA_TARGET_MASTER && target != FILE_OTA_TARGET_SLAVE &&
+        target != FILE_OTA_TARGET_STORAGE) {
         set_error("invalid target");
         return ESP_ERR_INVALID_ARG;
     }
+    s_delete_after = false;
 
     s_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "staging");
     if (!s_part) {
@@ -156,10 +167,10 @@ esp_err_t file_ota_begin(size_t total_size, int target)
     s_error[0] = '\0';
     s_reject_logs = 0;
     s_state = FILE_OTA_RECEIVING;
-    ESP_LOGI(TAG, "File OTA begin: %u bytes, target=%s, staging=%s",
-             (unsigned)total_size,
-             target == FILE_OTA_TARGET_MASTER ? "master" : "slave",
-             s_part ? "yes" : "no");
+    const char *tname = target == FILE_OTA_TARGET_MASTER ? "master" :
+                        target == FILE_OTA_TARGET_SLAVE ? "slave" : "storage";
+    ESP_LOGI(TAG, "File OTA begin: %u bytes, target=%s, name=%s, staging=%s",
+             (unsigned)total_size, tname, s_store_name, s_part ? "yes" : "no");
     return ESP_OK;
 }
 
@@ -205,6 +216,23 @@ esp_err_t file_ota_finish(void)
         ESP_LOGE(TAG, "Not a firmware image (magic 0x%02X)", s_buf[0]);
         return ESP_ERR_OTA_VALIDATE_FAILED;
     }
+    if (s_target == FILE_OTA_TARGET_STORAGE) {
+        /* Keep the image on the device; the app triggers the flash separately. */
+        esp_err_t err = player_storage_write_file(s_store_name, s_buf, s_total);
+        if (err != ESP_OK) {
+            set_error("cannot write to storage");
+            s_state = FILE_OTA_ERROR;
+            return err;
+        }
+        s_state = FILE_OTA_DONE;
+        ESP_LOGI(TAG, "Firmware stored as /storage/%s (%u bytes)", s_store_name, (unsigned)s_total);
+        if (s_buf) {
+            heap_caps_free(s_buf);
+            s_buf = NULL;
+        }
+        return ESP_OK;
+    }
+
     s_state = FILE_OTA_APPLYING;
     if (xTaskCreate(apply_task, "file_ota", 8192, NULL, 4, NULL) != pdPASS) {
         s_state = FILE_OTA_ERROR;
@@ -247,4 +275,80 @@ void file_ota_get_status(int *state, int *target, size_t *written, size_t *total
     if (written) *written = s_written;
     if (total) *total = s_total;
     if (applied) *applied = s_applied;
+}
+
+esp_err_t file_ota_set_name(const char *name)
+{
+    char safe[32];
+    if (!player_storage_sanitize_name(name, safe, sizeof(safe))) {
+        set_error("invalid file name");
+        return ESP_ERR_INVALID_ARG;
+    }
+    strlcpy(s_store_name, safe, sizeof(s_store_name));
+    return ESP_OK;
+}
+
+size_t file_ota_stored_size(const char *name)
+{
+    char safe[32];
+    size_t size = 0;
+    if (!player_storage_sanitize_name(name, safe, sizeof(safe))) return 0;
+    if (!player_storage_file_size(safe, &size)) return 0;
+    return size;
+}
+
+esp_err_t file_ota_flash_stored(const char *name, int target)
+{
+    if (s_state == FILE_OTA_APPLYING) {
+        set_error("device is applying previous update");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (target != FILE_OTA_TARGET_MASTER && target != FILE_OTA_TARGET_SLAVE) {
+        set_error("invalid target");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (player_storage_init() != ESP_OK) {
+        set_error("storage is not mounted");
+        return ESP_FAIL;
+    }
+
+    char safe[32];
+    if (!player_storage_sanitize_name(name, safe, sizeof(safe))) {
+        set_error("invalid file name");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t *buf = NULL;
+    size_t len = 0;
+    esp_err_t err = player_storage_read_file(safe, &buf, &len);
+    if (err != ESP_OK || !buf || len < 1024) {
+        set_error("stored image not found");
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (buf[0] != 0xE9) {
+        heap_caps_free(buf);
+        set_error("not a firmware .bin (bad magic)");
+        return ESP_ERR_OTA_VALIDATE_FAILED;
+    }
+
+    if (s_buf) heap_caps_free(s_buf);
+    s_buf = buf;
+    s_total = len;
+    s_written = len;
+    s_applied = 0;
+    s_target = target;
+    s_error[0] = '\0';
+    strlcpy(s_store_name, safe, sizeof(s_store_name));
+    s_delete_after = true;
+    s_state = FILE_OTA_APPLYING;
+
+    ESP_LOGI(TAG, "Flashing /storage/%s (%u bytes) -> %s",
+             s_store_name, (unsigned)len,
+             target == FILE_OTA_TARGET_MASTER ? "master" : "slave");
+
+    if (xTaskCreate(apply_task, "file_ota", 8192, NULL, 4, NULL) != pdPASS) {
+        s_state = FILE_OTA_ERROR;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }

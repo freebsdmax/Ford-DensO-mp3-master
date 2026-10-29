@@ -92,7 +92,8 @@
 #include "player_link.h"
 #include "player_logs.h"
 #include "player_slave.h"
-#include "player_media.h"     // Версія основного додатку
+#include "player_media.h"
+#include "player_storage.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #include "elm327_emu.h"         // ELM327 емулятор для діагностики
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -945,6 +946,7 @@ if (g_board_handle) {
         esp_err_t i2c_err = init_i2c_master();
     slave_version_start();
     player_media_start();
+    player_storage_init();
         if (i2c_err != ESP_OK) {
             ESP_LOGW(TAG, "⚠️ UART master ініціалізовано неуспішно: %s", esp_err_to_name(i2c_err));
         }

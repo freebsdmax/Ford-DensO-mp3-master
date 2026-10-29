@@ -7,6 +7,8 @@
 #include "player_slave.h"
 #include "cJSON.h"
 #include "player_logs.h"
+#include "player_storage.h"
+#include "esp_heap_caps.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"

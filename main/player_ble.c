@@ -549,9 +549,17 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (cJSON_IsString(tg)) {
             if (strcmp(tg->valuestring, "master") == 0) target = FILE_OTA_TARGET_MASTER;
             else if (strcmp(tg->valuestring, "slave") == 0) target = FILE_OTA_TARGET_SLAVE;
+            else if (strcmp(tg->valuestring, "storage") == 0) target = FILE_OTA_TARGET_STORAGE;
         }
-        esp_err_t err = cJSON_IsNumber(sz) ? file_ota_begin((size_t)sz->valueint, target)
-                                           : ESP_ERR_INVALID_ARG;
+        const cJSON *nm = j ? cJSON_GetObjectItemCaseSensitive(j, "name") : NULL;
+        esp_err_t err = ESP_OK;
+        if (target == FILE_OTA_TARGET_STORAGE) {
+            err = cJSON_IsString(nm) ? file_ota_set_name(nm->valuestring) : ESP_ERR_INVALID_ARG;
+        }
+        if (err == ESP_OK) {
+            err = cJSON_IsNumber(sz) ? file_ota_begin((size_t)sz->valueint, target)
+                                     : ESP_ERR_INVALID_ARG;
+        }
         if (j) cJSON_Delete(j);
         cJSON *root = cJSON_CreateObject();
         if (!root) return 0;
@@ -612,6 +620,27 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "success", err == ESP_OK);
         cJSON_AddStringToObject(root, "error", err == ESP_OK ? "" : esp_err_to_name(err));
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "file.flash") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *nm = j ? cJSON_GetObjectItemCaseSensitive(j, "name") : NULL;
+        const cJSON *tg = j ? cJSON_GetObjectItemCaseSensitive(j, "target") : NULL;
+        int target = FILE_OTA_TARGET_MASTER;
+        if (cJSON_IsString(tg) && strcmp(tg->valuestring, "slave") == 0) {
+            target = FILE_OTA_TARGET_SLAVE;
+        }
+        esp_err_t err = cJSON_IsString(nm)
+                            ? file_ota_flash_stored(nm->valuestring, target)
+                            : ESP_ERR_INVALID_ARG;
+        char reason[48] = "";
+        if (err != ESP_OK) file_ota_get_error(reason, sizeof(reason));
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddStringToObject(root, "error", reason);
         return ble_rpc_return_json(root, response, response_size);
     }
 
