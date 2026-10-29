@@ -185,6 +185,12 @@ bool player_media_seek_to(uint32_t target_ms)
 {
     player_media_t cur;
     player_media_get(&cur);
+    if (!cur.valid || cur.dur_ms == 0) {
+        /* Without a known position the delta would be nonsense (and would send a
+           burst of FF presses, which some players treat as "next track"). */
+        ESP_LOGW(TAG, "seek ignored: slave has no position yet");
+        return false;
+    }
     int32_t delta = (int32_t)target_ms - (int32_t)cur.pos_ms;
     return player_media_seek_by(delta);
 }

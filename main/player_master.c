@@ -654,12 +654,22 @@ char* get_player_status_json(void) {
     int duration_ms = g_current_track_duration_ms;
     if (duration_ms <= 0) duration_ms = 180000; // Запасний варіант
 
+    /* In external/BT mode the local player is idle: report the phone's state,
+       otherwise the app/web would keep resetting the progress to 0:00. */
+    int position_out = g_last_saved_position;
+    int paused_out = g_is_paused ? 1 : 0;
+    if (g_mode_external && media.valid) {
+        position_out = (int)media.pos_ms;
+        duration_ms = (int)media.dur_ms;
+        paused_out = media.playing ? 0 : 1;
+    }
+
     snprintf(json, 512,
              "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,"
              "\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s,"
              "\"media_valid\":%s,\"media_playing\":%s,\"media_pos\":%lu,\"media_dur\":%lu,"
              "\"media_title\":\"%s\",\"media_artist\":\"%s\"}",
-             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false",
+             g_current_track, position_out, duration_ms, paused_out ? "true" : "false",
              g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false",
              media.valid ? "true" : "false", media.playing ? "true" : "false",
              (unsigned long)media.pos_ms, (unsigned long)media.dur_ms,
