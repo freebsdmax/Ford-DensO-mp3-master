@@ -20,7 +20,7 @@
 | Slave (ESP32 Bluetooth) | https://github.com/freebsdmax/Ford-DensO-bluetooth-slave |
 | Android-застосунок | https://github.com/freebsdmax/Esp32_Android_app |
 
-- Повна довідка по системі: [HELP.md](https://github.com/freebsdmax/Ford-DensO-mp3-master/blob/debug/HELP.md)
+- Повна довідка по системі: [HELP.md](https://github.com/freebsdmax/Ford-DensO-mp3-master/blob/main/HELP.md)
 - Довідка цього компонента: [HELP.md](HELP.md)
 
 ---
