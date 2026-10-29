@@ -42,6 +42,31 @@ bool file_ota_busy(void)
     return s_state == FILE_OTA_APPLYING;
 }
 
+/** Writes the received image into /storage/<name> without blocking the RPC. */
+static void store_task(void *arg)
+{
+    (void)arg;
+    s_state = FILE_OTA_APPLYING;
+    s_applied = 0;
+
+    esp_err_t err = player_storage_write_file(s_store_name, s_buf, s_total);
+    if (s_buf) {
+        heap_caps_free(s_buf);
+        s_buf = NULL;
+    }
+
+    if (err != ESP_OK) {
+        set_error("cannot write to storage");
+        ESP_LOGE(TAG, "Storing /storage/%s failed: %s", s_store_name, esp_err_to_name(err));
+        s_state = FILE_OTA_ERROR;
+    } else {
+        s_applied = s_total;
+        s_state = FILE_OTA_DONE;
+        ESP_LOGI(TAG, "Firmware stored as /storage/%s (%u bytes)", s_store_name, (unsigned)s_total);
+    }
+    vTaskDelete(NULL);
+}
+
 static void apply_task(void *arg)
 {
     (void)arg;
@@ -217,18 +242,14 @@ esp_err_t file_ota_finish(void)
         return ESP_ERR_OTA_VALIDATE_FAILED;
     }
     if (s_target == FILE_OTA_TARGET_STORAGE) {
-        /* Keep the image on the device; the app triggers the flash separately. */
-        esp_err_t err = player_storage_write_file(s_store_name, s_buf, s_total);
-        if (err != ESP_OK) {
-            set_error("cannot write to storage");
+        /* Keep the image on the device; the app triggers the flash separately.
+           The FAT write takes seconds, so it must not block the BLE RPC: the
+           caller polls file.status until it reaches DONE (3) / ERROR (4). */
+        s_state = FILE_OTA_APPLYING;
+        if (xTaskCreate(store_task, "file_store", 4096, NULL, 4, NULL) != pdPASS) {
+            set_error("out of memory");
             s_state = FILE_OTA_ERROR;
-            return err;
-        }
-        s_state = FILE_OTA_DONE;
-        ESP_LOGI(TAG, "Firmware stored as /storage/%s (%u bytes)", s_store_name, (unsigned)s_total);
-        if (s_buf) {
-            heap_caps_free(s_buf);
-            s_buf = NULL;
+            return ESP_ERR_NO_MEM;
         }
         return ESP_OK;
     }
