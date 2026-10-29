@@ -164,4 +164,8 @@ void player_logs_apply(void)
         bool on = master && *player_logs_flag_ptr(i);
         esp_log_level_set(s_tags[i], on ? ESP_LOG_INFO : ESP_LOG_NONE);
     }
+    /* ELM327 lives in its own component with its own tag; the "Car" group
+       (CAN + ELM327) must be able to silence it too. */
+    esp_log_level_set("ELM327_EMU",
+                      (master && g_elm327_logs) ? ESP_LOG_INFO : ESP_LOG_NONE);
 }
