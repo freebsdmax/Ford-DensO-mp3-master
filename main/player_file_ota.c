@@ -314,6 +314,7 @@ size_t file_ota_stored_size(const char *name)
     char safe[32];
     size_t size = 0;
     if (!player_storage_sanitize_name(name, safe, sizeof(safe))) return 0;
+    player_storage_init();
     if (!player_storage_file_size(safe, &size)) return 0;
     return size;
 }
