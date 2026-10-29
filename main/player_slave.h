@@ -4,6 +4,9 @@
 void slave_version_start(void);
 void slave_version_refresh_now(void);
 
+/** Firmware version reported by the slave over UART (cached), "unknown" if never answered */
+void slave_fw_version_get(char *buf, size_t len);
+
 void slave_version_get(char *main_date, size_t main_date_len,
                        char *main_time, size_t main_time_len,
                        char *crc_date, size_t crc_date_len,

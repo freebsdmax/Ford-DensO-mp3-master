@@ -37,6 +37,9 @@
 #define UART_CMD_GET_VERSION       0x06
 #define UART_CMD_PLAY              0x07  /* AVRCP play  (external/BT mode) */
 #define UART_CMD_PAUSE             0x08
+#define UART_CMD_MEDIA_STATE       0x0A  /* slave -> master media state */
+#define UART_CMD_SEEK              0x0B  /* master -> slave: [delta_ms:int32 LE] */
+#define UART_CMD_GET_MEDIA         0x0C  /* master -> slave: request media state */
 #define UART_CMD_GET_FW_VER        0x09  /* firmware version: resp [0xAA][0x09][len][chars] */  /* AVRCP pause (external/BT mode) */  // Отримати версію збірки
 
 // ============ НАЛАШТУВАННЯ ============

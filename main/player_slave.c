@@ -16,6 +16,7 @@ static char s_crc_date[12];
 static char s_crc_time[9];
 static char s_uart_date[12];
 static char s_uart_time[9];
+static char s_fw[24] = "unknown";
 static SemaphoreHandle_t s_lock = NULL;
 static volatile bool s_refresh = false;
 
@@ -40,6 +41,14 @@ void slave_version_get(char *main_date, size_t main_date_len,
     copy_out(crc_time, crc_time_len, s_crc_time);
     copy_out(uart_date, uart_date_len, s_uart_date);
     copy_out(uart_time, uart_time_len, s_uart_time);
+    if (s_lock) xSemaphoreGive(s_lock);
+}
+
+void slave_fw_version_get(char *buf, size_t len)
+{
+    if (!buf || len == 0) return;
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    copy_out(buf, len, s_fw);
     if (s_lock) xSemaphoreGive(s_lock);
 }
 
@@ -89,6 +98,21 @@ static void slave_version_task(void *arg)
                 if (strcmp(sig, last_logged) != 0) {
                     strlcpy(last_logged, sig, sizeof(last_logged));
                     ESP_LOGI(TAG, "Slave version: %s", sig);
+                }
+
+                /* Firmware version (UART cmd 0x09) - slave >= v1.0.3 only */
+                char fw[24] = {0};
+                char fw_sig[26] = {0};
+                if (get_slave_fw_version(fw, sizeof(fw)) == ESP_OK && fw[0] != '\0') {
+                    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+                    strlcpy(s_fw, fw, sizeof(s_fw));
+                    strlcpy(fw_sig, s_fw, sizeof(fw_sig));
+                    if (s_lock) xSemaphoreGive(s_lock);
+                    static char fw_logged[26] = {0};
+                    if (strcmp(fw_sig, fw_logged) != 0) {
+                        strlcpy(fw_logged, fw_sig, sizeof(fw_logged));
+                        ESP_LOGI(TAG, "Slave firmware: %s", fw_sig);
+                    }
                 }
             } else {
                 ESP_LOGW(TAG, "Slave version query failed");

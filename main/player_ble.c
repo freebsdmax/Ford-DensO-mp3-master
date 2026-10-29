@@ -5,6 +5,7 @@
 #include "player_sleep.h"
 #include "player_logs.h"
 #include "player_slave.h"
+#include "player_media.h"
 #include "player_slave_ota.h"
 #include "player_file_ota.h"
 #include "player_ble_ota.h"
@@ -548,9 +549,17 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (cJSON_IsString(tg)) {
             if (strcmp(tg->valuestring, "master") == 0) target = FILE_OTA_TARGET_MASTER;
             else if (strcmp(tg->valuestring, "slave") == 0) target = FILE_OTA_TARGET_SLAVE;
+            else if (strcmp(tg->valuestring, "storage") == 0) target = FILE_OTA_TARGET_STORAGE;
         }
-        esp_err_t err = cJSON_IsNumber(sz) ? file_ota_begin((size_t)sz->valueint, target)
-                                           : ESP_ERR_INVALID_ARG;
+        const cJSON *nm = j ? cJSON_GetObjectItemCaseSensitive(j, "name") : NULL;
+        esp_err_t err = ESP_OK;
+        if (target == FILE_OTA_TARGET_STORAGE) {
+            err = cJSON_IsString(nm) ? file_ota_set_name(nm->valuestring) : ESP_ERR_INVALID_ARG;
+        }
+        if (err == ESP_OK) {
+            err = cJSON_IsNumber(sz) ? file_ota_begin((size_t)sz->valueint, target)
+                                     : ESP_ERR_INVALID_ARG;
+        }
         if (j) cJSON_Delete(j);
         cJSON *root = cJSON_CreateObject();
         if (!root) return 0;
@@ -611,6 +620,27 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "success", err == ESP_OK);
         cJSON_AddStringToObject(root, "error", err == ESP_OK ? "" : esp_err_to_name(err));
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "file.flash") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *nm = j ? cJSON_GetObjectItemCaseSensitive(j, "name") : NULL;
+        const cJSON *tg = j ? cJSON_GetObjectItemCaseSensitive(j, "target") : NULL;
+        int target = FILE_OTA_TARGET_MASTER;
+        if (cJSON_IsString(tg) && strcmp(tg->valuestring, "slave") == 0) {
+            target = FILE_OTA_TARGET_SLAVE;
+        }
+        esp_err_t err = cJSON_IsString(nm)
+                            ? file_ota_flash_stored(nm->valuestring, target)
+                            : ESP_ERR_INVALID_ARG;
+        char reason[48] = "";
+        if (err != ESP_OK) file_ota_get_error(reason, sizeof(reason));
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddStringToObject(root, "error", reason);
         return ble_rpc_return_json(root, response, response_size);
     }
 
@@ -690,10 +720,9 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         cJSON_AddStringToObject(root, "uart_build_time", uart_time);
         char smd[12], smt[9], scd[12], sct[9], sud[12], sut[9];
         slave_version_get(smd, sizeof(smd), smt, sizeof(smt), scd, sizeof(scd), sct, sizeof(sct), sud, sizeof(sud), sut, sizeof(sut));
-            char sfw[32] = "unknown";
-        if (get_slave_fw_version(sfw, sizeof(sfw)) != ESP_OK || sfw[0] == '\0') {
-            strlcpy(sfw, "unknown", sizeof(sfw));
-        }
+        char sfw[32] = "unknown";
+        slave_fw_version_get(sfw, sizeof(sfw));
+        if (sfw[0] == '\0') strlcpy(sfw, "unknown", sizeof(sfw));
         cJSON_AddStringToObject(root, "slave_fw_version", sfw);
         cJSON_AddStringToObject(root, "slave_main_build_date", smd);
         cJSON_AddStringToObject(root, "slave_main_build_time", smt);
@@ -701,6 +730,20 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         cJSON_AddStringToObject(root, "slave_crc_build_time", sct);
         cJSON_AddStringToObject(root, "slave_uart_build_date", sud);
         cJSON_AddStringToObject(root, "slave_uart_build_time", sut);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "media.get") == 0) {
+        player_media_t media;
+        player_media_get(&media);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "valid", media.valid);
+        cJSON_AddBoolToObject(root, "playing", media.playing);
+        cJSON_AddNumberToObject(root, "pos_ms", media.pos_ms);
+        cJSON_AddNumberToObject(root, "dur_ms", media.dur_ms);
+        cJSON_AddStringToObject(root, "title", media.title);
+        cJSON_AddStringToObject(root, "artist", media.artist);
         return ble_rpc_return_json(root, response, response_size);
     }
 

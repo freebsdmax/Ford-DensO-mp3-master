@@ -7,6 +7,8 @@
 #include "player_slave.h"
 #include "cJSON.h"
 #include "player_logs.h"
+#include "player_storage.h"
+#include "esp_heap_caps.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
 #include "freertos/FreeRTOS.h"
@@ -564,8 +566,10 @@ static const char *INDEX_HTML =
 "  var sn = document.getElementById('sniffer-enabled');" 
 "  if (sn) sn.addEventListener('change', function(e){ setSnifferState(e.target.checked?1:0); });" 
 "});" 
+"let lastStatus = null;"
 "function updatePlayerStatus(){"
 "  fetch('/player_status').then(r=>r.json()).then(s=>{"
+"    lastStatus = s;"
 "    const progress = document.getElementById('progress-bar');"
 "    const timeDisplay = document.getElementById('time-display');"
 "    const status = document.getElementById('player-status');"
@@ -578,9 +582,12 @@ static const char *INDEX_HTML =
 "      });"
 "    }"
 "    "
-"    if (progress && timeDisplay && s.duration_ms > 0) {"
-"      const correctedPos = Math.min(s.position_ms / 3000, s.duration_ms / 1000);"
-"      const correctedDur = s.duration_ms / 1000;"
+"    const ext = s.mode === 'external' && s.media_valid;"
+"    const posMs = ext ? s.media_pos : s.position_ms;"
+"    const durMs = ext ? s.media_dur : s.duration_ms;"
+"    if (progress && timeDisplay && durMs > 0) {"
+"      const correctedPos = ext ? Math.min(posMs / 1000, durMs / 1000) : Math.min(posMs / 3000, durMs / 1000);"
+"      const correctedDur = durMs / 1000;"
 "      progress.max = correctedDur;"
 "      progress.value = correctedPos;"
 "      const posMin = Math.floor(correctedPos / 60);"
@@ -591,7 +598,14 @@ static const char *INDEX_HTML =
 "    }"
 "    "
 "    if (status) {"
-"      status.textContent = 'Трек ' + (s.current_track + 1) + '/' + s.playlist_size + ' ' + (s.is_paused ? '(пауза)' : '(відтворюється)') + ' Режим: ' + s.mode;" 
+"      if (ext) {"
+"        const t = (s.media_artist ? s.media_artist + ' — ' : '') + (s.media_title || '—');"
+"        status.textContent = (s.media_playing ? '▶ ' : '⏸ ') + t + ' (' + s.mode + ')';"
+"      } else if (s.mode === 'external') {"
+"        status.textContent = 'Bluetooth: метадані недоступні';"
+"      } else {"
+"        status.textContent = 'Трек ' + (s.current_track + 1) + '/' + s.playlist_size + ' ' + (s.is_paused ? '(пауза)' : '(відтворюється)') + ' Режим: ' + s.mode;"
+"      }"
 "    }" 
 "    try { var sn = document.getElementById('sniffer-enabled'); if (sn) sn.checked = !!s.sniffer_enabled; } catch(e){}" 
 "  }).catch(e=>{console.log('Error updating status:',e);});"
@@ -606,7 +620,9 @@ static const char *INDEX_HTML =
 "}"
 "setInterval(updateLogs, 2000);"
 "document.getElementById('progress-bar').oninput = function() {"
-"  fetch('/player_cmd?cmd=set_pos&pos=' + (this.value * 3000)).catch(e=>{console.log('Error seeking:',e);});"
+"  const st = lastStatus;"
+"  const ext = st && st.mode === 'external';"
+"  fetch('/player_cmd?cmd=set_pos&pos=' + Math.round(this.value * (ext ? 1000 : 3000))).catch(e=>{console.log('Error seeking:',e);});"
 "};"
 "const logEl=document.getElementById('log');const prog=document.getElementById('progress');const uploadProg=document.getElementById('upload-progress');const otaProg=document.getElementById('ota-progress');"
 "const log=(msg,color)=>{logEl.style.color=color||'#0a0';logEl.textContent=msg;};"
@@ -912,20 +928,25 @@ static esp_err_t version_get_handler(httpd_req_t *req)
                       cached_slave_uart_date, sizeof(cached_slave_uart_date),
                       cached_slave_uart_time, sizeof(cached_slave_uart_time));
 
-    char json[512];
+    char slave_fw[32] = "unknown";
+    slave_fw_version_get(slave_fw, sizeof(slave_fw));
+
+    char json[640];
     int len = snprintf(json, sizeof(json),
                        "{\"player_build_date\":\"%s\",\"player_build_time\":\"%s\","
                        "\"web_build_date\":\"%s\",\"web_build_time\":\"%s\","
                        "\"uart_build_date\":\"%s\",\"uart_build_time\":\"%s\","
                        "\"slave_main_build_date\":\"%s\",\"slave_main_build_time\":\"%s\","
                        "\"slave_crc_build_date\":\"%s\",\"slave_crc_build_time\":\"%s\","
-                       "\"slave_uart_build_date\":\"%s\",\"slave_uart_build_time\":\"%s\"}",
+                       "\"slave_uart_build_date\":\"%s\",\"slave_uart_build_time\":\"%s\","
+                       "\"slave_fw_version\":\"%s\"}",
                        player_date, player_time,
                        web_date, web_time,
                        uart_date, uart_time,
                        cached_slave_main_date, cached_slave_main_time,
                        cached_slave_crc_date, cached_slave_crc_time,
-                       cached_slave_uart_date, cached_slave_uart_time);
+                       cached_slave_uart_date, cached_slave_uart_time,
+                       slave_fw);
     
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, json, len);
