@@ -13,7 +13,9 @@
 #include "freertos/task.h"
 #include <string.h>
 
-static const char *TAG_CAN = "Player";
+/* "Can" tag: CAN frames must be filtered by the "Car" log group
+   (CAN + ELM327), not by the player group. */
+static const char *TAG_CAN = "Can";
 
 extern bool g_verbose_logs;
 extern bool g_player_logs;
