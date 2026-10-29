@@ -1,218 +1,235 @@
-# ПОЛНОЕ ТЕХНИЧЕСКОЕ ЗАДАНИЕ И АРХИТЕКТУРНЫЙ ПЛАН
-# Медиасистема Ford Denso: Master (ESP32-S3) + Slave (ESP32 BT) + Android App
+# ПОВНЕ ТЕХНІЧНЕ ЗАВДАННЯ ТА АРХІТЕКТУРНИЙ ПЛАН
 
-> **Назначение документа:** Полное техническое описание аппаратной части, архитектуры, протоколов взаимодействия и пошаговых алгоритмов работы **всей экосистемы**: Master ESP32-S3, Slave ESP32 и Android-приложения (`AndroidPlayer`). Документ самодостаточен и может быть передан любому AI-агенту или разработчику для создания новой модульной кодовой базы.
+# Медіасистема Ford Denso: Master (ESP32-S3) + Slave (ESP32 BT) + Android App
+
+> **Призначення документа:** повний технічний опис апаратної частини, архітектури, протоколів взаємодії та покрокових алгоритмів роботи **всієї екосистеми**: Master ESP32-S3, Slave ESP32 і Android-застосунку (`AndroidPlayer`). Документ самодостатній і може бути переданий будь-якому AI-агенту або розробнику для створення нової модульної кодової бази.
 
 ---
 
-## 1. ОБЩИЙ ОБЗОР И РОЛИ КОМПОНЕНТОВ
+## 1. ЗАГАЛЬНИЙ ОГЛЯД І РОЛІ КОМПОНЕНТІВ
 
-Система эмулирует штатный медиаплеер для головных устройств автомобилей Ford (с шиной CAN магнитол Ford Denso / Visteon) и распределена между тремя ключевыми узлами:
+Система емулює штатний медіаплеєр для головних пристроїв автомобілів Ford (з шиною CAN магнітол Ford Denso / Visteon) і розподілена між трьома ключовими вузлами:
 
 ```
-[ Смартфон: Музыка (A2DP) ] 
-        │ 
-        ▼ 
-[ ESP32 SLAVE BT ] (Приемник A2DP "ForD DensO")
-        │ 
-        ├─── I2S Звук (GPIO 26, 33, 25) ─────► I2S Вход (GPIO 41, 39, 40) ────┐
-        ├─── UART Команды/OTA (GPIO 22, 23) ◄──► UART Связь (GPIO 8, 9) ──────┤
-        └─── Sleep Sync Вход (GPIO 34) ◄────── Sleep Sync Выход (GPIO 21) ──┤
+[ Смартфон: Музика (A2DP) ]
+        │
+        ▼
+[ ESP32 SLAVE BT ] (A2DP-приймач "ForD DensO")
+        │
+        ├─── I2S Звук (GPIO 26, 33, 25) ─────► I2S Вхід (GPIO 41, 39, 40) ────┐
+        ├─── UART Команди/OTA (GPIO 22, 23) ◄──► UART Зв'язок (GPIO 8, 9) ────┤
+        └─── Sleep Sync Вхід (GPIO 34) ◄────── Sleep Sync Вихід (GPIO 21) ──┤
                                                                             ▼
                                                                  [ ESP32-S3 MASTER ]
                                                                     │   │   │
                       CAN-шина Ford (GPIO 4 TX, 15 RX) ─────────────┘   │   └── USB Flash OTG (GPIO 19, 20)
-                      I2S Выход на ЦАП PCM5102 (GPIO 16, 17, 18) ───────┘
+                      I2S Вихід на ЦАП PCM5102 (GPIO 16, 17, 18) ───────┘
                                                                             │
                                                         ┌───────────────────┴───────────────────┐
                                                         ▼ (BLE GATT)                            ▼ (Wi-Fi HTTP REST)
-                                            [ ANDROID-ПРИЛОЖЕНИЕ: AndroidPlayer (Jetpack Compose) ]
+                                            [ ANDROID-ЗАСТОСУНОК: AndroidPlayer (Jetpack Compose) ]
 ```
 
 ### Роль 1: Master ESP32-S3
-- **Хранилище и плеер:** Читает USB-флешку (FAT32) через USB-Host OTG. Воспроизводит аудио (MP3) через пайплайн ESP-ADF.
-- **ЦАП (Выход звука):** Тактирует внешний аудио-ЦАП PCM5102 по I2S0 Master (44.1/48 kHz, 16 bit Stereo).
-- **Вход внешнего звука:** Принимает I2S1 Slave поток от ESP32 Slave и транслирует в ЦАП в режиме passthrough.
-- **CAN-шина Ford:** Подключается к CAN-шине (125 kbps, ID `0x2D5`), обрабатывает кнопки руля/магнитолы, фильтрует дребезг (debounce).
-- **Синхронизация питания:** При отсутствии CAN уходит в Deep Sleep и сигналом через `GPIO 21` отправляет Slave чип в Deep Sleep. Просыпается от CAN RX (`GPIO 15`).
-- **Связь и OTA со Slave:** Передает команды Next/Prev по UART1 и выполняет поблочную OTA-прошивку Slave платы.
-- **Сетевые сервисы:** Wi-Fi SoftAP/STA, Web UI панель, Web OTA, UDP CAN Sniffer (wxCAN-Sniffer), TCP ELM327 сервер (диагностика), BLE GATT сервер для мобильного приложения.
+
+- **Сховище і плеєр:** читає USB-флешку (FAT32) через USB-Host OTG. Відтворює аудіо (MP3) через пайплайн ESP-ADF.
+- **ЦАП (вихід звуку):** тактує зовнішній аудіо-ЦАП PCM5102 по I2S0 Master (44.1/48 кГц, 16 біт стерео).
+- **Вхід зовнішнього звуку:** приймає потік I2S1 Slave від ESP32 Slave і транслює його в ЦАП у режимі passthrough.
+- **CAN-шина Ford:** підключається до CAN-шини (125 кбіт/с, ID `0x2D5`), обробляє кнопки керма/магнітоли, фільтрує брязкіт (debounce).
+- **Синхронізація живлення:** за відсутності CAN іде в Deep Sleep і сигналом через `GPIO 21` відправляє Slave-чіп у Deep Sleep. Прокидається від CAN RX (`GPIO 15`).
+- **Зв'язок і OTA зі Slave:** передає команди Next/Prev по UART1 і виконує поблочну OTA-прошивку плати Slave.
+- **Мережеві сервіси:** Wi-Fi SoftAP/STA, панель Web UI, Web OTA, UDP CAN Sniffer (wxCAN-Sniffer), TCP-сервер ELM327 (діагностика), BLE GATT-сервер для мобільного застосунку.
 
 ### Роль 2: Slave ESP32 (Bluetooth Audio Sink)
-- **Bluetooth Стек:** Приемник A2DP Sink (имя `"ForD DensO"`) и профиль управления AVRCP.
-- **Авто-переподключение (Auto-reconnect):** Сохраняет MAC-адрес последнего подключенного смартфона в NVS (`a2dp_sink`). При старте фоновая задача `bt_reconnect_task` автоматически восстанавливает соединение.
-- **Аудио-выход:** Передает декодированный PCM-звук по аппаратному I2S0 (Master TX) на Master ESP32-S3.
-- **UART Командный обработчик (`uart_cmd_task`):**
-  - Принимает обычные команды управления (`0xAA 0x04` Next, `0xAA 0x05` Prev) и переключает треки на смартфоне через AVRCP.
-  - Принимает запрос версии (`0xAA 0x06`) и возвращает структуру версий сборки.
-  - Принимает поток OTA-обновления (`0x55 ...`) и прошивает свой Flash-раздел (`ota_0`/`ota_1`) с верификацией CRC16/CRC32.
-- **Контроль питания:** Задача `i2c_sleep_monitor_task` опрашивает `GPIO 34`. Как только Master переводит линию в LOW, Slave уходит в Deep Sleep. Просыпается по уровню на `GPIO 34`.
 
-### Роль 3: Android-приложение (`AndroidPlayer`)
+- **Стек Bluetooth:** A2DP Sink (ім'я `"ForD DensO"`) і профіль керування AVRCP.
+- **Автоперепідключення (Auto-reconnect):** зберігає MAC-адресу останнього підключеного смартфона в NVS (`a2dp_sink`). Під час старту фонова задача `bt_reconnect_task` автоматично відновлює з'єднання.
+- **Аудіовихід:** передає декодований PCM-звук по апаратному I2S0 (Master TX) на Master ESP32-S3.
+- **Обробник UART-команд (`uart_cmd_task`):**
+  - приймає звичайні команди керування (`0xAA 0x04` Next, `0xAA 0x05` Prev) і перемикає треки на смартфоні через AVRCP;
+  - приймає запит версії (`0xAA 0x06`) і повертає структуру версій збірок;
+  - приймає потік OTA-оновлення (`0x55 …`) і прошиває свій Flash-розділ (`ota_0`/`ota_1`) з перевіркою CRC16/CRC32.
+- **Контроль живлення:** задача `i2c_sleep_monitor_task` опитує `GPIO 34`. Щойно Master переводить лінію в LOW, Slave іде в Deep Sleep. Прокидається за рівнем на `GPIO 34`.
+
+### Роль 3: Android-застосунок (`AndroidPlayer`)
+
 - **Стек:** Kotlin, Jetpack Compose, Material 3, Coroutines, StateFlow, Dagger Hilt, Retrofit / OkHttp, Android BLE GATT.
-- **Двухканальный транспорт (Dual-Transport):** Управляет плеером либо через **Bluetooth Low Energy (BLE)**, либо через **Wi-Fi HTTP REST API** (переключается в репозитории на лету).
-- **Экраны:**
-  1. `PlayerScreen`: Управление треками (Play/Pause, Next, Prev, Seek бар, список плейлиста, выбор трека по клику, отображение текущего режима USB/External).
-  2. `BleDiscoveryScreen`: Сканирование эфира, поиск устройства `ESP32_MP3_Player`, подключение/отключение BLE GATT.
-  3. `WifiSettingsScreen`: Настройка точки доступа AP (SSID, пароль) и клиента STA (домашняя сеть Wi-Fi).
-  4. `OtaScreen`: Выбор бинарных файлов `.bin` и прошивка Master ESP32 или Slave ESP32 по воздуху.
-  5. `SettingsScreen`: Настройка тайм-аутов сна, уровней логирования компонентов.
-  6. `SystemMonitorScreen`: Просмотр терминальных логов устройства в реальном времени, мониторинг памяти и перезагрузка.
+- **Двоканальний транспорт (Dual-Transport):** керує плеєром або через **Bluetooth Low Energy (BLE)**, або через **Wi-Fi HTTP REST API** (перемикається в репозиторії на льоту).
+- **Екрани:**
+  1. `PlayerScreen`: керування треками (Play/Pause, Next, Prev, смуга Seek, список плейлиста, вибір треку кліком, відображення поточного режиму USB/External).
+  2. `BleDiscoveryScreen`: сканування ефіру, пошук пристрою `ESP32_MP3_Player`, підключення/відключення BLE GATT.
+  3. `WifiSettingsScreen`: налаштування точки доступу AP (SSID, пароль) і клієнта STA (домашня мережа Wi-Fi).
+  4. `OtaScreen`: вибір бінарних файлів `.bin` і прошивка Master ESP32 або Slave ESP32 по повітрю.
+  5. `SettingsScreen`: налаштування тайм-аутів сну, рівнів логування компонентів.
+  6. `SystemMonitorScreen`: перегляд термінальних логів пристрою в реальному часі, моніторинг пам'яті й перезавантаження.
 
 ---
 
-## 2. АППАРАТНАЯ КАРТА ПОДКЛЮЧЕНИЙ И ПИНОВ
+## 2. АПАРАТНА КАРТА ПІДКЛЮЧЕНЬ І ПІНІВ
 
-| Сигнал / Функция | Master ESP32-S3 | Slave ESP32 | Направление | Описание |
+| Сигнал / функція | Master ESP32-S3 | Slave ESP32 | Напрямок | Опис |
 | :--- | :--- | :--- | :--- | :--- |
-| **I2S Bit Clock (BCLK)** | `GPIO 41` (In) | `GPIO 26` (Out) | Slave ➔ Master | Тактовый сигнал битов аудио (44.1/48 kHz) |
-| **I2S Word Select (WS)** | `GPIO 39` (In) | `GPIO 33` (Out) | Slave ➔ Master | Синхронизация каналов Left/Right |
-| **I2S Data (DIN / DOUT)**| `GPIO 40` (In) | `GPIO 25` (Out) | Slave ➔ Master | Поток сэмплов PCM от Bluetooth к Master |
-| **UART Link TX ➔ RX**    | `GPIO 8` (TX)   | `GPIO 22` (RX)  | Master ➔ Slave | Команды управления (0xAA) и OTA прошивка (0x55) |
-| **UART Link RX ◄─ TX**    | `GPIO 9` (RX)   | `GPIO 23` (TX)  | Slave ➔ Master | Ответы ACK/NACK, статусы, версии ПО |
-| **Sleep Sync (Линия сна)**| `GPIO 21` (Out) | `GPIO 34` (In)  | Master ➔ Slave | HIGH = работа, LOW = команда уйти в Deep Sleep |
-| **Общая земля (GND)**    | `GND`           | `GND`           | Двунаправленно | Общая земля для стабильности I2S и UART |
-| **Питание**              | `3.3V / 5V`     | `3.3V / 5V`     | Источник        | Стабилизированное питание |
+| **I2S Bit Clock (BCLK)** | `GPIO 41` (In) | `GPIO 26` (Out) | Slave ➔ Master | Тактовий сигнал бітів аудіо (44.1/48 кГц) |
+| **I2S Word Select (WS)** | `GPIO 39` (In) | `GPIO 33` (Out) | Slave ➔ Master | Синхронізація каналів Left/Right |
+| **I2S Data (DIN / DOUT)** | `GPIO 40` (In) | `GPIO 25` (Out) | Slave ➔ Master | Потік PCM-семплів від Bluetooth до Master |
+| **UART Link TX ➔ RX** | `GPIO 8` (TX) | `GPIO 22` (RX) | Master ➔ Slave | Команди керування (0xAA) і OTA-прошивка (0x55) |
+| **UART Link RX ◄─ TX** | `GPIO 9` (RX) | `GPIO 23` (TX) | Slave ➔ Master | Відповіді ACK/NACK, статуси, версії ПЗ |
+| **Sleep Sync (лінія сну)** | `GPIO 21` (Out) | `GPIO 34` (In) | Master ➔ Slave | HIGH = робота, LOW = команда йти в Deep Sleep |
+| **Спільна земля (GND)** | `GND` | `GND` | Двонаправлено | Спільна земля для стабільності I2S і UART |
+| **Живлення** | `3.3V / 5V` | `3.3V / 5V` | Джерело | Стабілізоване живлення |
 
-### Внешняя периферия Master ESP32-S3:
-- `GPIO 4`  — CAN TX (к микросхеме CAN-трансивера)
-- `GPIO 15` — CAN RX (от CAN-трансивера; источник ext0 Wakeup)
-- `GPIO 17` — I2S0 BCLK Out (к аудио ЦАП PCM5102)
-- `GPIO 18` — I2S0 WS Out (к аудио ЦАП PCM5102)
-- `GPIO 16` — I2S0 DOUT Out (к аудио ЦАП PCM5102)
-- `GPIO 19` — USB OTG D- (шина данных USB-флешки)
-- `GPIO 20` — USB OTG D+ (шина данных USB-флешки)
-- `GPIO 0`  — Кнопка BOOT (ручное переключение / отладка)
+### Зовнішня периферія Master ESP32-S3:
+
+- `GPIO 4` — CAN TX (до мікросхеми CAN-трансивера)
+- `GPIO 15` — CAN RX (від CAN-трансивера; джерело ext0 Wakeup)
+- `GPIO 17` — I2S0 BCLK Out (до аудіо-ЦАП PCM5102)
+- `GPIO 18` — I2S0 WS Out (до аудіо-ЦАП PCM5102)
+- `GPIO 16` — I2S0 DOUT Out (до аудіо-ЦАП PCM5102)
+- `GPIO 19` — USB OTG D- (шина даних USB-флешки)
+- `GPIO 20` — USB OTG D+ (шина даних USB-флешки)
+- `GPIO 0` — кнопка BOOT (ручне перемикання / налагодження)
 
 ---
 
-## 3. ДЕТАЛЬНЫЕ ПРОТОКОЛЫ ВЗАИМОДЕЙСТВИЯ
+## 3. ДЕТАЛЬНІ ПРОТОКОЛИ ВЗАЄМОДІЇ
 
-### 3.1. Межчиповый протокол UART (115200 бод, 8N1)
-Каждый пакет начинается с байта-префикса:
-1. **Команды управления (Префикс `0xAA`):**
-   - `0xAA 0x04` — `UART_CMD_NEXT_TRACK` ➔ Slave вызывает `periph_bluetooth_next()`.
-   - `0xAA 0x05` — `UART_CMD_PREV_TRACK` ➔ Slave вызывает `periph_bluetooth_prev()`.
-   - `0xAA 0x06` — `UART_CMD_GET_VERSION` ➔ Slave отвечает пакетом `version_response_t` (даты и время сборок компонентов).
-2. **OTA-обновление Slave (Префикс `0x55`):**
-   - Старт: `[0x55][0x01][size: 4B][crc32: 4B]` ➔ Slave инициализирует раздел `ota_0`/`ota_1` через `esp_ota_begin()`.
-   - Блок данных: `[0x55][0x02][block_num: 2B][data_len: 1B][data: N байт (до 240)][crc16: 2B]` ➔ Slave проверяет CRC16 Modbus и пишет во flash.
-   - Финализация: `[0x55][0x03][final_crc32: 4B]` ➔ Slave верифицирует общую CRC32, вызывает `esp_ota_set_boot_partition()` и перезагружается.
+### 3.1. Міжчіповий протокол UART (115200 бод, 8N1)
+
+Кожен пакет починається з байта-префікса:
+
+1. **Команди керування (префікс `0xAA`):**
+   - `0xAA 0x04` — `UART_CMD_NEXT_TRACK` ➔ Slave викликає `periph_bluetooth_next()`.
+   - `0xAA 0x05` — `UART_CMD_PREV_TRACK` ➔ Slave викликає `periph_bluetooth_prev()`.
+   - `0xAA 0x06` — `UART_CMD_GET_VERSION` ➔ Slave відповідає пакетом `version_response_t` (дати й час збірок компонентів).
+2. **OTA-оновлення Slave (префікс `0x55`):**
+   - Старт: `[0x55][0x01][size: 4B][crc32: 4B]` ➔ Slave ініціалізує розділ `ota_0`/`ota_1` через `esp_ota_begin()`.
+   - Блок даних: `[0x55][0x02][block_num: 2B][data_len: 1B][data: N байт (до 240)][crc16: 2B]` ➔ Slave перевіряє CRC16 Modbus і пише у flash.
+   - Фіналізація: `[0x55][0x03][final_crc32: 4B]` ➔ Slave верифікує загальну CRC32, викликає `esp_ota_set_boot_partition()` і перезавантажується.
 
 ### 3.2. CAN-шина Ford Denso (TWAI)
-- **Скорость:** 125 kbps, ID: `0x2D5`.
-- **Логика команд:**
-  * `data[1] & 0xF0 == 0x40` (кроме 0x49) — **NEXT TRACK**. В USB: следующий MP3. В External: шлет `0xAA 0x04` на Slave.
-  * `data[1] & 0xF0 == 0x80` (кроме 0x89) — **PREV TRACK**. В USB: предыдущий MP3. В External: шлет `0xAA 0x05` на Slave.
-  * `data[1] & 0xF0 == 0x10` (кроме 0x19) — **MODE SWITCH** (USB <-> BT).
 
-### 3.3. Синхронизация энергосбережения и Deep Sleep
-1. **Master:** при молчании CAN дольше `idle_timeout_sec` сохраняет позицию трека, опускает `GPIO 21` в **LOW (0V)**, включает пробуждение по CAN RX (`GPIO 15`, уровень LOW) и уходит в Deep Sleep.
-2. **Slave:** задача `i2c_sleep_monitor_task` при появлении **LOW (0V)** на `GPIO 34` уходит в Deep Sleep, настраивая пробуждение по `GPIO 34`.
-3. **Пробуждение:** CAN RX будит Master, Master поднимает `GPIO 21` в **HIGH (3.3V)**, что мгновенно будит Slave.
+- **Швидкість:** 125 кбіт/с, ID: `0x2D5`.
+- **Логіка команд:**
+  * `data[1] & 0xF0 == 0x40` (крім 0x49) — **NEXT TRACK**. У USB: наступний MP3. В External: шле `0xAA 0x04` на Slave.
+  * `data[1] & 0xF0 == 0x80` (крім 0x89) — **PREV TRACK**. У USB: попередній MP3. В External: шле `0xAA 0x05` на Slave.
+  * `data[1] & 0xF0 == 0x10` (крім 0x19) — **MODE SWITCH** (USB <-> BT).
 
-### 3.4. BLE GATT Протокол (Master ↔ Android App)
+### 3.3. Синхронізація енергозбереження та Deep Sleep
+
+1. **Master:** при тиші на CAN довше за `idle_timeout_sec` зберігає позицію треку, опускає `GPIO 21` у **LOW (0V)**, вмикає пробудження по CAN RX (`GPIO 15`, рівень LOW) і йде в Deep Sleep.
+2. **Slave:** задача `i2c_sleep_monitor_task` при появі **LOW (0V)** на `GPIO 34` іде в Deep Sleep, налаштовуючи пробудження по `GPIO 34`.
+3. **Пробудження:** CAN RX будить Master, Master піднімає `GPIO 21` у **HIGH (3.3V)**, що миттєво будить Slave.
+
+### 3.4. BLE GATT протокол (Master ↔ Android App)
+
 - **Service UUID:** `11000000-0000-1000-8000-00805f9b34fb`
-- **Characteristics:**
-  * `Command (11010000-...)`: Write (команды `play`, `pause`, `next`, `prev`, `track:<id>`, `seek:<pos_ms>`, `mode`).
-  * `Status (11020000-...)`: Read / Notify (строка CSV: `track,position_ms,duration_ms,is_paused,playlist_size`).
-  * `Playlist (11030000-...)`: Read / Notify (список файлов плейлиста).
-  * `Logs (11040000-...)`: Read / Notify (текстовый поток системных логов).
+- **Характеристики:**
+  * `Command (11010000-…)`: Write (команди `play`, `pause`, `next`, `prev`, `track:<id>`, `seek:<pos_ms>`, `mode`).
+  * `Status (11020000-…)`: Read / Notify (рядок CSV: `track,position_ms,duration_ms,is_paused,playlist_size`).
+  * `Playlist (11030000-…)`: Read / Notify (список файлів плейлиста).
+  * `Logs (11040000-…)`: Read / Notify (текстовий потік системних логів).
 
 ### 3.5. HTTP REST API (Master ↔ Android App / Web UI)
-- `GET /player_status` ➔ JSON статус плеера.
-- `GET /playlist` ➔ JSON массив имен треков.
-- `GET /player_cmd?cmd=...&track=...&pos=...` ➔ отправка команд.
-- `GET/POST /wifi_settings` ➔ конфигурация AP / STA.
-- `GET/POST /sleep_settings` ➔ конфигурация сна и тайм-аутов.
-- `POST /upload` ➔ загрузка бинарника прошивки Master ESP32-S3.
-- `POST /upload_slave` ➔ загрузка бинарника прошивки Slave ESP32.
-- `GET /logs`, `POST /restart` ➔ утилиты диагностики.
+
+- `GET /player_status` ➔ JSON-статус плеєра.
+- `GET /playlist` ➔ JSON-масив назв треків.
+- `GET /player_cmd?cmd=…&track=…&pos=…` ➔ надсилання команд.
+- `GET/POST /wifi_settings` ➔ конфігурація AP / STA.
+- `GET/POST /sleep_settings` ➔ конфігурація сну й тайм-аутів.
+- `POST /upload` ➔ завантаження бінарника прошивки Master ESP32-S3.
+- `POST /upload_slave` ➔ завантаження бінарника прошивки Slave ESP32.
+- `GET /logs`, `POST /restart` ➔ утиліти діагностики.
 
 ---
 
-## 4. СТРУКТУРА ПРОЕКТОВ В РЕПОЗИТОРИИ
+## 4. СТРУКТУРА ПРОЄКТІВ У РЕПОЗИТОРІЇ
 
 ```
 D:\emulators\
-├── Ford-DensO-mp3-master\              <-- Проект MASTER ESP32-S3
+├── Ford-DensO-mp3-master\              <-- Проєкт MASTER ESP32-S3
 │   ├── main\
-│   │   ├── play_music-master.c         <-- Основной монолит (4756 строк)
-│   │   ├── uart_ota_master.c           <-- UART протокол Master
-│   │   ├── web_ota.c                   <-- HTTP веб-сервер и Web OTA
-│   │   └── ble_player_service.h        <-- Заголовки BLE
+│   │   ├── player_master.c             <-- Основний модуль (запуск, CAN, USB, BLE, Web)
+│   │   ├── uart_ota_master.c           <-- UART-протокол Master
+│   │   ├── web_ota.c                   <-- HTTP веб-сервер і Web OTA
+│   │   └── player_ble.c                <-- BLE GATT / RPC
 │   ├── components\
-│   │   ├── ble_player_service\         <-- BLE GATT сервис
-│   │   ├── elm327_wifi\                <-- TCP эмулятор ELM327
-│   │   ├── wifi_can_sniffer\           <-- UDP транслятор CAN
-│   │   └── my_board\                   <-- Пины I2S и кодека
-│   └── AndroidPlayer\                  <-- ANDROID ПРИЛОЖЕНИЕ (Kotlin Compose)
+│   │   ├── ble_player_service\         <-- BLE GATT-сервіс
+│   │   ├── elm327_wifi\                <-- TCP-емулятор ELM327
+│   │   ├── wifi_can_sniffer\           <-- UDP-транслятор CAN
+│   │   └── my_board\                   <-- Піни I2S і кодека
+│   └── AndroidPlayer\                  <-- ANDROID-ЗАСТОСУНОК (Kotlin Compose)
 │       └── app\src\main\java\com\example\androidplayer\
-│           ├── data\ble\               <-- BlePlayerClient.kt (GATT клиент)
+│           ├── data\ble\               <-- BlePlayerClient.kt (GATT-клієнт)
 │           ├── data\network\           <-- Esp32PlayerApi.kt (Retrofit REST)
 │           ├── data\repository\        <-- Esp32PlayerRepository.kt (Dual-Transport)
-│           └── ui\screens\             <-- Экраны: Player, BLE, Wifi, OTA, Logs
+│           └── ui\screens\             <-- Екрани: Player, BLE, Wifi, OTA, Logs
 │
-└── Ford-DensO-bluetooth-slave\         <-- Проект SLAVE ESP32
+└── Ford-DensO-bluetooth-slave\         <-- Проєкт SLAVE ESP32
     └── main\
-        ├── a2dp-slave.c                <-- Ядро Slave (Bluetooth A2DP, авто-реконнект)
-        ├── uart_ota_slave.c            <-- Запись OTA прошивки по UART во Flash
-        ├── uart_ota_crc.c              <-- Алгоритмы CRC16/CRC32
-        └── uart_ota_protocol.h         <-- Описание пакетов межчиповой связи
+        ├── a2dp-slave.c                <-- Ядро Slave (Bluetooth A2DP, автоперепідключення)
+        ├── avrc_media.c                <-- AVRCP-метадані (назва, виконавець, позиція)
+        ├── uart_ota_slave.c            <-- Запис OTA-прошивки по UART у Flash
+        ├── uart_ota_crc.c              <-- Алгоритми CRC16/CRC32
+        └── uart_ota_protocol.h         <-- Опис пакетів міжчіпового зв'язку
 ```
 
 ---
 
-## 5. ВЫЯВЛЕННЫЕ ПРОБЛЕМЫ И ЦЕЛИ РЕФАКТОРИНГА
+## 5. ВИЯВЛЕНІ ПРОБЛЕМИ ТА ЦІЛІ РЕФАКТОРИНГУ
+
+> Стан на момент написання документа. Частину пунктів уже закрито (див. `HELP.md`).
 
 ### Master ESP32-S3:
-1. **Монолитность `play_music-master.c`:** 4756 строк в одном файле. Требуется разделение на модули: `app_player`, `app_can`, `app_power`, `app_usb`, `app_ble`, `app_slave_link`.
-2. **Заглушки в BLE:** в `ble_player_service.c` нет реального периодического таймера `Notify`, а на запросы плейлиста возвращается статический хардкод.
-3. **Отсутствие регулятора громкости:** ЦАП PCM5102 не имеет аппаратного I2C регулятора, требуется программный софтверный регулятор громкости (Software Volume).
-4. **Неточный Seek в VBR MP3:** расчет смещения по фиксированному битрейту сбивает перемотку.
+
+1. **Монолітність `player_master.c`:** багато рядків в одному файлі. Потрібне розділення на модулі: `app_player`, `app_can`, `app_power`, `app_usb`, `app_ble`, `app_slave_link`.
+2. **Заглушки в BLE:** історично не було реального періодичного таймера `Notify`, а на запити плейлиста повертався статичний хардкод.
+3. **Відсутність регулятора громкості:** ЦАП PCM5102 не має апаратного I2C-регулятора, потрібен програмний регулятор громкості (Software Volume).
+4. **Неточний Seek у VBR MP3:** розрахунок зміщення за фіксованим бітрейтом збиває перемотку.
 
 ### Slave ESP32:
-1. **Отсутствие передачи метаданных:** Slave знает название песни и артиста от смартфона по AVRCP, но не передает их на Master по UART.
-2. **Синхронизация паузы Bluetooth:** при переключении магнитолы на USB нужно слать `PAUSE` на смартфон через AVRCP.
 
-### Android-приложение (`AndroidPlayer`):
-1. **Блокировка `switch_mode` по BLE:** в `Esp32PlayerRepository.kt` выброс исключения `throw UnsupportedOperationException("switch_mode not supported over BLE")`, хотя по BLE переключение режимов реализовать очень просто.
-2. **Разрыв BLE-нотификаций:** из-за отсутствия таймера в прошивке экран плеера в приложении не обновляет ползунок времени при подключении по BLE.
+1. **Відсутність передачі метаданих:** Slave знає назву пісні й виконавця від смартфона по AVRCP, але не передає їх на Master по UART. *(закрито у v1.0.5)*
+2. **Синхронізація паузи Bluetooth:** при перемиканні магнітоли на USB потрібно слати `PAUSE` на смартфон через AVRCP.
+
+### Android-застосунок (`AndroidPlayer`):
+
+1. **Блокування `switch_mode` по BLE:** в `Esp32PlayerRepository.kt` було викидання винятку `throw UnsupportedOperationException("switch_mode not supported over BLE")`.
+2. **Розрив BLE-нотифікацій:** через відсутність таймера в прошивці екран плеєра не оновлював смугу часу при підключенні по BLE.
 
 ---
 
-## 6. ЧЕК-ЛИСТ ТРЕБОВАНИЙ ДЛЯ РАЗРАБОТКИ НОВОГО КОДА
+## 6. ЧЕК-ЛИСТ ВИМОГ ДЛЯ РОЗРОБКИ НОВОГО КОДУ
 
-> Отметьте нужные пункты `[x]`, скорректируйте или допишите свои пожелания.
+> Позначте потрібні пункти `[x]`, скоригуйте або допишіть свої побажання.
 
 ```text
-[ ] 1. АРХИТЕКТУРА И МОДУЛЬНОСТЬ (MASTER):
-    - [ ] Разбить play_music-master.c на независимые модули:
-          * main/app_main.c (инициализация и общая координация)
-          * main/player/audio_player.c (.h) (управление USB и воспроизведением)
-          * main/can/can_manager.c (.h) (TWAI CAN и кнопки Ford 0x2D5)
-          * main/power/power_manager.c (.h) (мониторинг шины, Deep Sleep, GPIO 21)
-          * main/slave_link/slave_link.c (.h) (UART протокол и OTA прошивка Slave)
-          * main/ble/ble_manager.c (.h) (рабочий BLE сервер)
+[ ] 1. АРХІТЕКТУРА І МОДУЛЬНІСТЬ (MASTER):
+    - [ ] Розбити player_master.c на незалежні модулі:
+          * main/app_main.c (ініціалізація та загальна координація)
+          * main/player/audio_player.c (.h) (керування USB і відтворенням)
+          * main/can/can_manager.c (.h) (TWAI CAN і кнопки Ford 0x2D5)
+          * main/power/power_manager.c (.h) (моніторинг шини, Deep Sleep, GPIO 21)
+          * main/slave_link/slave_link.c (.h) (UART-протокол і OTA-прошивка Slave)
+          * main/ble/ble_manager.c (.h) (робочий BLE-сервер)
 
-[ ] 2. АРХИТЕКТУРА И МОДУЛЬНОСТЬ (SLAVE):
+[ ] 2. АРХІТЕКТУРА І МОДУЛЬНІСТЬ (SLAVE):
     - [ ] Рефакторинг a2dp-slave.c:
-          * Вынести Bluetooth стек A2DP в отдельный модуль
-          * Вынести UART команды и OTA в отдельный модуль
-          * Очистить устаревший код HFP
+          * Винести стек Bluetooth A2DP в окремий модуль
+          * Винести UART-команди й OTA в окремий модуль
+          * Прибрати застарілий код HFP
 
-[ ] 3. ВЗАИМОДЕЙСТВИЕ MASTER <-> SLAVE:
-    - [ ] Добавить передачу метаданных трека (Название, Артист) со Slave на Master по UART
-    - [ ] Автоматическая пауза Bluetooth на смартфоне при переключении источника на USB
-    - [ ] Синхронизация уровня громкости между Master и Slave
+[ ] 3. ВЗАЄМОДІЯ MASTER <-> SLAVE:
+    - [ ] Додати передачу метаданих треку (назва, виконавець) зі Slave на Master по UART
+    - [ ] Автоматична пауза Bluetooth на смартфоні при перемиканні джерела на USB
+    - [ ] Синхронізація рівня громкості між Master і Slave
 
-[ ] 4. АУДИОСИСТЕМА:
-    - [ ] Реализовать программную регулировку громкости (Software Volume) для ЦАП PCM5102
-    - [ ] Улучшить точность Seek (перемотки) для треков с переменным битрейтом (VBR)
-    - [ ] Добавить навигацию по папкам флешки (папка как альбом)
+[ ] 4. АУДІОСИСТЕМА:
+    - [ ] Реалізувати програмне регулювання громкості (Software Volume) для ЦАП PCM5102
+    - [ ] Покращити точність Seek (перемотки) для треків зі змінним бітрейтом (VBR)
+    - [ ] Додати навігацію по папках флешки (папка як альбом)
 
-[ ] 5. ANDROID-ПРИЛОЖЕНИЕ (AndroidPlayer):
-    - [ ] Включить команду переключения режима USB/BT (switch_mode) через BLE
-    - [ ] Обеспечить плавное обновление позиции воспроизведения (Seek Bar) по BLE Notify
-    - [ ] Отображать название трека и исполнителя при воспроизведении по Bluetooth
+[ ] 5. ANDROID-ЗАСТОСУНОК (AndroidPlayer):
+    - [ ] Увімкнути команду перемикання режиму USB/BT (switch_mode) через BLE
+    - [ ] Забезпечити плавне оновлення позиції відтворення (Seek Bar) по BLE Notify
+    - [ ] Відображати назву треку й виконавця при відтворенні по Bluetooth
 ```
