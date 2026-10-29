@@ -623,6 +623,16 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         return ble_rpc_return_json(root, response, response_size);
     }
 
+    if (strcmp(request_copy, "file.stored") == 0) {
+        /* Sizes of the images kept in /storage, so the app can skip a repeated
+           upload when the same firmware is already on the device. */
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "master", (double)file_ota_stored_size("master.bin"));
+        cJSON_AddNumberToObject(root, "slave", (double)file_ota_stored_size("slave.bin"));
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
     if (strcmp(request_copy, "file.flash") == 0 && payload) {
         cJSON *j = cJSON_Parse(payload);
         const cJSON *nm = j ? cJSON_GetObjectItemCaseSensitive(j, "name") : NULL;

@@ -1513,78 +1513,47 @@ static esp_err_t upload_slave_handler(httpd_req_t *req)
  */
 static esp_err_t upload_to_storage_handler(httpd_req_t *req)
 {
-    const esp_partition_t *storage_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, 
-                                                                     ESP_PARTITION_SUBTYPE_DATA_FAT, NULL);
-    if (!storage_part) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Storage partition not found");
+    /* Keep the image in the internal FAT partition (/storage) so it can be
+       flashed later and is deleted only after a successful update. */
+    if (req->content_len <= 0 || req->content_len > (2 * 1024 * 1024)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size (max 2MB)");
+        return ESP_FAIL;
+    }
+    if (player_storage_init() != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Storage is not available");
         return ESP_FAIL;
     }
 
-    if (req->content_len <= 0 || req->content_len > storage_part->size) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size for storage");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "Uploading firmware to storage: %d bytes", (int)req->content_len);
-
-    s_prog.active = true;
-    s_prog.is_uart_slave = false;
-    s_prog.total = req->content_len;
-    s_prog.written = 0;
-
-    // Erase storage partition first
-    esp_err_t err = esp_partition_erase_range(storage_part, 0, storage_part->size);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Storage erase failed: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Erase failed");
-        s_prog.active = false;
-        return err;
-    }
-
-    size_t remaining = req->content_len;
-    size_t offset = 0;
-    char *buf = malloc(1024);
+    size_t total = (size_t)req->content_len;
+    uint8_t *buf = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = heap_caps_malloc(total, MALLOC_CAP_8BIT);
     if (!buf) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory error");
-        s_prog.active = false;
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
         return ESP_FAIL;
     }
 
-    while (remaining > 0) {
-        size_t to_recv = remaining > 1024 ? 1024 : remaining;
-        int recv_len = httpd_req_recv(req, buf, to_recv);
-        if (recv_len <= 0) {
-            if (recv_len == HTTPD_SOCK_ERR_TIMEOUT) {
-                continue;
-            }
-            ESP_LOGE(TAG, "Storage upload receive error");
-            free(buf);
+    size_t got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, (char *)buf + got, total - got);
+        if (r <= 0) {
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            heap_caps_free(buf);
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
-            s_prog.active = false;
             return ESP_FAIL;
         }
-
-        err = esp_partition_write(storage_part, offset, buf, recv_len);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Storage write failed: %s", esp_err_to_name(err));
-            free(buf);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
-            s_prog.active = false;
-            return err;
-        }
-
-        offset += recv_len;
-        remaining -= recv_len;
-        s_prog.written = offset;
-        vTaskDelay(pdMS_TO_TICKS(5));
+        got += (size_t)r;
     }
 
-    free(buf);
+    esp_err_t err = player_storage_write_file("firmware.bin", buf, got);
+    heap_caps_free(buf);
+
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot write to storage");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "Firmware saved to /storage/firmware.bin (%u bytes)", (unsigned)got);
     httpd_resp_set_type(req, "text/plain");
-    httpd_resp_sendstr(req, "Firmware saved to storage");
-    s_prog.active = false;
-    ESP_LOGI(TAG, "Firmware uploaded to storage: %zu bytes", offset);
-    return ESP_OK;
+    return httpd_resp_sendstr(req, "Firmware saved to /storage/firmware.bin");
 }
 
 
