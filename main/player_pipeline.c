@@ -148,6 +148,7 @@ void stop_playback(void) {
 #include "player_wifi.h"
 #include "uart_ota_protocol.h"
 #include "player_link.h"
+#include "player_media.h"
 
 /**
  * @brief Ask the slave for its firmware version (UART command 0x09).
@@ -319,6 +320,13 @@ int get_current_position(audio_element_handle_t fatfs_stream_reader) {
 }
 
 void player_set_position(int position_ms) {
+    if (g_mode_external || !g_usb_mounted) {
+        /* The media lives on the phone; the slave translates this into
+           AVRCP fast-forward/rewind steps. */
+        player_media_seek_to((uint32_t)position_ms);
+        ESP_LOGI(TAG_PIPE, "🌐 Веб: seek %d мс -> slave", position_ms);
+        return;
+    }
     g_seek_position_ms = position_ms;
     ESP_LOGI(TAG_PIPE, "🌐 Веб: встановити позицію %d мс", position_ms);
 }

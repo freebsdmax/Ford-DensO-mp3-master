@@ -91,7 +91,8 @@
 #include "player_wifi.h"
 #include "player_link.h"
 #include "player_logs.h"
-#include "player_slave.h"     // Версія основного додатку
+#include "player_slave.h"
+#include "player_media.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #include "elm327_emu.h"         // ELM327 емулятор для діагностики
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -619,17 +620,51 @@ char* get_playlist_json(void) {
 /**
  * 📊 Отримати статус плеєра у форматі JSON
  */
+static void json_escape(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0;
+    if (!dst || cap == 0) return;
+    for (const char *p = src; p && *p && o + 2 < cap; ++p) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+        } else if (c < 0x20) {
+            dst[o++] = ' ';
+        } else {
+            dst[o++] = (char)c;
+        }
+    }
+    dst[o] = '\0';
+}
+
 char* get_player_status_json(void) {
-    char *json = malloc(256);
+    player_media_t media;
+    player_media_get(&media);
+
+    char mtitle[160];
+    char martist[100];
+    json_escape(mtitle, sizeof(mtitle), media.title);
+    json_escape(martist, sizeof(martist), media.artist);
+
+    char *json = malloc(512);
     if (!json) return strdup("{}");
-    
+
     // Використовуємо розраховану тривалість
     int duration_ms = g_current_track_duration_ms;
     if (duration_ms <= 0) duration_ms = 180000; // Запасний варіант
-    
-    snprintf(json, 256, "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s}",
-             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false", g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false");
-    
+
+    snprintf(json, 512,
+             "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,"
+             "\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s,"
+             "\"media_valid\":%s,\"media_playing\":%s,\"media_pos\":%lu,\"media_dur\":%lu,"
+             "\"media_title\":\"%s\",\"media_artist\":\"%s\"}",
+             g_current_track, g_last_saved_position, duration_ms, g_is_paused ? "true" : "false",
+             g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false",
+             media.valid ? "true" : "false", media.playing ? "true" : "false",
+             (unsigned long)media.pos_ms, (unsigned long)media.dur_ms,
+             mtitle, martist);
+
     return json;
 }
 
@@ -899,6 +934,7 @@ if (g_board_handle) {
         // Ініціалізація UART master для відправки команд на зовнішній пристрій
         esp_err_t i2c_err = init_i2c_master();
     slave_version_start();
+    player_media_start();
         if (i2c_err != ESP_OK) {
             ESP_LOGW(TAG, "⚠️ UART master ініціалізовано неуспішно: %s", esp_err_to_name(i2c_err));
         }
@@ -1283,8 +1319,13 @@ if (g_board_handle) {
                     int pos_ms = msg.data.int_param;
                     ESP_LOGI(TAG, "⏩ BLE: Seek to %d ms", pos_ms);
                     if (pos_ms >= 0) {
-                        g_seek_position_ms = pos_ms;
-                        ESP_LOGI(TAG, "✅ Seek requested to %d ms", pos_ms);
+                        if (g_mode_external) {
+                            player_media_seek_to((uint32_t)pos_ms);
+                            ESP_LOGI(TAG, "➡️ Seek forwarded to slave: %d ms", pos_ms);
+                        } else {
+                            g_seek_position_ms = pos_ms;
+                            ESP_LOGI(TAG, "✅ Seek requested to %d ms", pos_ms);
+                        }
                     } else {
                         ESP_LOGW(TAG, "⚠️ Invalid seek position: %d", pos_ms);
                     }
