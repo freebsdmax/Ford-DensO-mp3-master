@@ -26,7 +26,7 @@
                       I2S Вихід на ЦАП PCM5102 (GPIO 16, 17, 18) ───────┘
                                                                             │
                                                         ┌───────────────────┴───────────────────┐
-                                                        ▼ (BLE GATT)                            ▼ (Wi-Fi HTTP REST)
+                                                        ▼ (BLE GATT)                     ▼ (Wi-Fi HTTP — лише браузер)
                                             [ ANDROID-ЗАСТОСУНОК: AndroidPlayer (Jetpack Compose) ]
 ```
 
@@ -54,7 +54,7 @@
 ### Роль 3: Android-застосунок (`AndroidPlayer`)
 
 - **Стек:** Kotlin, Jetpack Compose, Material 3, Coroutines, StateFlow, Dagger Hilt, Retrofit / OkHttp, Android BLE GATT.
-- **Двоканальний транспорт (Dual-Transport):** керує плеєром або через **Bluetooth Low Energy (BLE)**, або через **Wi-Fi HTTP REST API** (перемикається в репозиторії на льоту).
+- **Транспорт — тільки BLE.** Увесь обмін із Master іде через **Bluetooth Low Energy (BLE)**: JSON-RPC + бінарні кадри OTA. Wi-Fi HTTP REST на пристрої є, але ним користується **лише веб-браузер** (Web UI), застосунок його не використовує.
 - **Екрани:**
   1. `PlayerScreen`: керування треками (Play/Pause, Next, Prev, смуга Seek, список плейлиста, вибір треку кліком, відображення поточного режиму USB/External).
   2. `BleDiscoveryScreen`: сканування ефіру, пошук пристрою `ESP32_MP3_Player`, підключення/відключення BLE GATT.
@@ -124,10 +124,10 @@
 
 - **Service UUID:** `11000000-0000-1000-8000-00805f9b34fb`
 - **Характеристики:**
-  * `Command (11010000-…)`: Write (команди `play`, `pause`, `next`, `prev`, `track:<id>`, `seek:<pos_ms>`, `mode`).
-  * `Status (11020000-…)`: Read / Notify (рядок CSV: `track,position_ms,duration_ms,is_paused,playlist_size`).
-  * `Playlist (11030000-…)`: Read / Notify (список файлів плейлиста).
-  * `Logs (11040000-…)`: Read / Notify (текстовий потік системних логів).
+  * `Command (11010100-0000-1000-8000-00805f9b34fb)`: Write (команди `play`, `pause`, `next`, `prev`, `track:<id>`, `seek:<pos_ms>`, `mode`).
+  * `Status (11010200-0000-1000-8000-00805f9b34fb)`: Read / Notify (рядок CSV: `track,position_ms,duration_ms,is_paused,playlist_size,mode,sniffer`).
+  * `Playlist (11010300-0000-1000-8000-00805f9b34fb)`: Read / Notify (список файлів плейлиста).
+  * `Logs (11010400-0000-1000-8000-00805f9b34fb)`: Read / Notify (текстовий потік системних логів).
 
 ### 3.5. HTTP REST API (Master ↔ Android App / Web UI)
 
@@ -161,7 +161,7 @@ D:\emulators\
 │       └── app\src\main\java\com\example\androidplayer\
 │           ├── data\ble\               <-- BlePlayerClient.kt (GATT-клієнт)
 │           ├── data\network\           <-- Esp32PlayerApi.kt (Retrofit REST)
-│           ├── data\repository\        <-- Esp32PlayerRepository.kt (Dual-Transport)
+│           ├── data\repository\        <-- Esp32PlayerRepository.kt (BLE-only)
 │           └── ui\screens\             <-- Екрани: Player, BLE, Wifi, OTA, Logs
 │
 └── Ford-DensO-bluetooth-slave\         <-- Проєкт SLAVE ESP32

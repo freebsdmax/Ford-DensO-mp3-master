@@ -51,7 +51,7 @@
 │ • BLE GATT-сервер ("ESP32_MP3_Player")                 │
 │ • Wi-Fi панель Web UI і Web OTA прошивка Master/Slave  │
 └───────────────────────────┬────────────────────────────┘
-                            │ (BLE GATT / Wi-Fi HTTP REST)
+                            │ (BLE GATT; Wi-Fi REST — лише браузер)
                             ▼
 ┌────────────────────────────────────────────────────────┐
 │ ANDROID-ЗАСТОСУНОК (Kotlin, Jetpack Compose)           │
@@ -114,10 +114,10 @@
 - **Ім'я пристрою:** `ESP32_MP3_Player`
 - **Service UUID:** `11000000-0000-1000-8000-00805f9b34fb`
 - **Характеристики:**
-  - `11010000-…` (**Command**, Write): рядкові команди `play`, `pause`, `next`, `prev`, `track:<id>`, `seek:<ms>`, `mode`, `vol:<0-100>`.
-  - `11020000-…` (**Status**, Read / Notify): періодичне розсилання статусу `track,position_ms,duration_ms,is_paused,playlist_size,volume`.
-  - `11030000-…` (**Playlist**, Read / Notify): передача списку треків.
-  - `11040000-…` (**Logs**, Read / Notify): текстовий потік логів.
+  - `11010100-0000-1000-8000-00805f9b34fb` (**Command**, Write): рядкові команди `play`, `pause`, `next`, `prev`, `track:<id>`, `seek:<ms>`, `mode`, `vol:<0-100>`.
+  - `11010200-0000-1000-8000-00805f9b34fb` (**Status**, Read / Notify): періодичне розсилання статусу `track,position_ms,duration_ms,is_paused,playlist_size,mode,sniffer`.
+  - `11010300-0000-1000-8000-00805f9b34fb` (**Playlist**, Read / Notify): передача списку треків.
+  - `11010400-0000-1000-8000-00805f9b34fb` (**Logs**, Read / Notify): текстовий потік логів.
 
 ### 3.4. HTTP REST API Master-контролера (порт 80)
 
@@ -175,7 +175,7 @@
 
 ### Для Android-застосунку
 
-- Kotlin, Jetpack Compose, архітектура MVVM + Repository (з підтримкою перемикання BLE / HTTP);
+- Kotlin, Jetpack Compose, архітектура MVVM + Repository; транспорт — **тільки BLE** (Wi-Fi REST використовує лише браузер);
 - підтримка команди `mode` по BLE;
 - плавний прогрес-бар треку за даними BLE Notify.
 
