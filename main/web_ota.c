@@ -159,7 +159,7 @@ static char cached_slave_uart_date[12] = "";
 static char cached_slave_uart_time[9] = "";
 
 static const char *INDEX_HTML =
-"<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'><title>ESP32 Web Control</title>"
+"<!DOCTYPE html><html lang='uk'><head><meta charset='utf-8'><title>Ford Player — веб-керування</title>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
 "<style>"
 "* {box-sizing: border-box;}"
@@ -383,8 +383,8 @@ static const char *INDEX_HTML =
 "</style></head><body>"
 "<div class='container'>"
 "  <div class='header'>"
-"    <h2>🎵 ESP32 Music Player</h2>"
-"    <p class='lead'>Manage music, OTA and Wi‑Fi CAN Sniffer — clean, fast control for your device.</p>"
+"    <h2>🎵 Ford Player</h2>"
+"    <p class='lead'>Музика, оновлення прошивки та Wi‑Fi CAN-сніфер — усе в одному місці.</p>"
 "  </div>"
 "  <div style='padding:0 1rem 1rem 1rem;'>"
 "<div class='tabs'>"
@@ -439,7 +439,7 @@ static const char *INDEX_HTML =
 "    <div style='display:flex; align-items:center; justify-content:space-between;'>"
 "      <h3>🌐 Wi-Fi налаштування</h3>"
 "      <div style='display:flex; align-items:center; gap:0.5rem;'>"
-"        <label style='font-weight:600;margin-right:0.5rem;'>WiFi CAN Sniffer</label>"
+"        <label style='font-weight:600;margin-right:0.5rem;'>Wi‑Fi CAN-сніфер</label>"
 "        <label class='switch'>"
 "          <input type='checkbox' id='sniffer-enabled'>"
 "          <span class='slider'></span>"
@@ -479,18 +479,18 @@ static const char *INDEX_HTML =
 "      <label>Режим сну:</label><br>"
 "      <select id='sleep-mode'>"
 "        <option value='0'>Вимкнено</option>"
-"        <option value='3'>Deep Sleep</option>"
+"        <option value='3'>Глибокий сон</option>"
 "      </select><br>"
 "      <label>Час бездіяльності (секунди, min 10):</label><br>"
 "      <input type='number' id='idle-timeout' min='10' max='28800' value='30'><br>"
 "      <label>Рівень логів:</label><br>"
 "      <select id='log-level'>"
-"        <option value='0'>None</option>"
-"        <option value='1'>Error</option>"
-"        <option value='2'>Warn</option>"
-"        <option value='3'>Info</option>"
-"        <option value='4'>Debug</option>"
-"        <option value='5'>Verbose</option>"
+"        <option value='0'>Немає</option>"
+"        <option value='1'>Помилки</option>"
+"        <option value='2'>Попередження</option>"
+"        <option value='3'>Інформація</option>"
+"        <option value='4'>Налагодження</option>"
+"        <option value='5'>Детально</option>"
 "      </select><br>"
 "      <label><input type='checkbox' id='verbose-logs'> Детальні логи (емодзі та банери)</label><br><br>"
 "      <h4>Логи за модулями:</h4>"
@@ -629,22 +629,22 @@ static const char *INDEX_HTML =
 "const poll=()=>{fetch('/ota_status').then(r=>r.json()).then(s=>{console.log('OTA status:',s);"
 "if(!s.active){otaProg.style.display='none';prog.textContent='';return;}"
 "const p=Math.round(s.written*100/Math.max(1,s.total));"
-"const mode=s.is_uart_slave?'UART Slave':'Master Flash';"
+"const mode=s.is_uart_slave?'Slave через UART':'Master (flash)';"
 "otaProg.value=p;otaProg.style.display='block';"
-"prog.textContent=mode + ': ' + p + '% (' + s.written + '/' + s.total + ' bytes)';}).catch(e=>console.log('Poll error:',e));};setInterval(poll,500);"
+"prog.textContent=mode + ': ' + p + '% (' + s.written + '/' + s.total + ' байт)';}).catch(e=>console.log('Poll error:',e));};setInterval(poll,500);"
 "function setupForm(formId,fileId,url){"
 "const f=document.getElementById(formId);const file=document.getElementById(fileId);"
-"f.onsubmit=e=>{e.preventDefault();if(!file.files.length){log('Select a file','#c00');return;}"
+"f.onsubmit=e=>{e.preventDefault();if(!file.files.length){log('Виберіть файл','#c00');return;}"
 "const fr=new FileReader();"
 "fr.onload=()=>{const xhr=new XMLHttpRequest();xhr.open('POST',url);"
 "xhr.upload.onprogress=ev=>{if(ev.lengthComputable){"
 "const pct=Math.round(ev.loaded*100/ev.total);"
 "uploadProg.value=pct;uploadProg.style.display='block';"
-"prog.textContent='Uploading: ' + pct + '% (' + ev.loaded + '/' + ev.total + ' bytes)';}};"
-"xhr.onload=()=>{uploadProg.style.display='none';log(xhr.responseText||'Done',xhr.status===200?'#0a0':'#c00');};"
-"xhr.onerror=()=>{uploadProg.style.display='none';log('Network error','#c00');};"
-"xhr.send(fr.result);uploadProg.style.display='block';log('Upload started...','#06c');};"
-"fr.onerror=()=>{log('Read error','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
+"prog.textContent='Завантаження: ' + pct + '% (' + ev.loaded + '/' + ev.total + ' байт)';}};"
+"xhr.onload=()=>{uploadProg.style.display='none';log(xhr.responseText||'Готово',xhr.status===200?'#0a0':'#c00');};"
+"xhr.onerror=()=>{uploadProg.style.display='none';log('Помилка мережі','#c00');};"
+"xhr.send(fr.result);uploadProg.style.display='block';log('Завантаження почалось…','#06c');};"
+"fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
 "function loadWifiSettings(){"
@@ -790,7 +790,7 @@ static const char *INDEX_HTML =
 "window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} };"
 "</script>"
 
-"<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>ESP32 Music Player — web control • by your device</footer>"
+"<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
 
 "</body></html>";
 
@@ -973,7 +973,7 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
     char buf[100];
     int ret = httpd_req_get_url_query_str(req, buf, sizeof(buf));
     if (ret != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No query");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Немає параметрів запиту");
         return ESP_FAIL;
     }
 
@@ -1027,7 +1027,7 @@ static esp_err_t wifi_settings_get_handler(httpd_req_t *req)
     esp_err_t err = get_wifi_settings(sta_ssid, sizeof(sta_ssid), sta_password, sizeof(sta_password),
                                      ap_ssid, sizeof(ap_ssid), ap_password, sizeof(ap_password), &mode);
     if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to load settings");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вдалося завантажити налаштування");
         return ESP_FAIL;
     }
     
@@ -1045,7 +1045,7 @@ static esp_err_t wifi_settings_post_handler(httpd_req_t *req)
     char buf[512];  // Збільшено буфер
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Немає даних");
         return ESP_FAIL;
     }
     buf[ret] = '\0';  // Null-terminate
@@ -1141,17 +1141,17 @@ static esp_err_t wifi_settings_post_handler(httpd_req_t *req)
     
     // Валідація
     if (strlen(sta_ssid) == 0 && mode == 1) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "STA SSID required for STA mode");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Для режиму STA потрібен SSID");
         return ESP_FAIL;
     }
     if (strlen(ap_ssid) == 0 && mode == 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "AP SSID required for AP mode");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Для режиму AP потрібен SSID");
         return ESP_FAIL;
     }
     
     esp_err_t err = set_wifi_settings(sta_ssid, sta_password, ap_ssid, ap_password, mode);
     if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save settings");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вдалося зберегти налаштування");
         return ESP_FAIL;
     }
     
@@ -1171,7 +1171,7 @@ static esp_err_t sleep_settings_get_handler(httpd_req_t *req)
     esp_err_t err = get_sleep_settings(&sleep_mode, &idle_timeout_sec);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get sleep settings: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to load sleep settings");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вдалося завантажити налаштування сну");
         return ESP_FAIL;
     }
     
@@ -1191,7 +1191,7 @@ static esp_err_t sleep_settings_post_handler(httpd_req_t *req)
     char buf[256];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Немає даних");
         return ESP_FAIL;
     }
     buf[ret] = '\0';
@@ -1220,18 +1220,18 @@ static esp_err_t sleep_settings_post_handler(httpd_req_t *req)
     
     // Валідація
     if (sleep_mode < 0 || sleep_mode > 3) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid sleep mode (0-3)");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний режим сну (0-3)");
         return ESP_FAIL;
     }
     if (idle_timeout_sec < 10 || idle_timeout_sec > 28800) { // 10 сек - 8 годин
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid timeout (10-28800 sec)");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний таймаут (10-28800 с)");
         return ESP_FAIL;
     }
     
     extern esp_err_t set_sleep_settings(int sleep_mode, int idle_timeout_sec);
     esp_err_t err = set_sleep_settings(sleep_mode, idle_timeout_sec);
     if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save sleep settings");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вдалося зберегти налаштування сну");
         return ESP_FAIL;
     }
     
@@ -1246,19 +1246,19 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
 {
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Немає OTA-розділу");
         return ESP_FAIL;
     }
 
     if (req->content_len <= 0 || req->content_len > update_partition->size) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний розмір прошивки");
         return ESP_FAIL;
     }
 
     // Allocate buffer for entire firmware
     uint8_t *firmware_buf = malloc(req->content_len);
     if (!firmware_buf) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вистачило пам'яті");
         return ESP_FAIL;
     }
 
@@ -1270,7 +1270,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     char *buf = malloc(1024);
     if (!buf) {
         free(firmware_buf);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вистачило пам'яті");
         return ESP_FAIL;
     }
 
@@ -1282,7 +1282,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
             }
             free(buf);
             free(firmware_buf);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Помилка прийому даних");
             return ESP_FAIL;
         }
         
@@ -1296,7 +1296,7 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     if (offset == 0) {
         ESP_LOGE(TAG, "OTA aborted: received 0 bytes");
         free(firmware_buf);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data received");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Дані не отримано");
         return ESP_FAIL;
     }
 
@@ -1324,12 +1324,12 @@ static esp_err_t upload_post_handler(httpd_req_t *req)
     if (xTaskCreate(master_ota_task, "master_ota", 4096, firmware_buf, 5, NULL) != pdPASS) {
         free(firmware_buf);
         s_prog.active = false;
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to start OTA task");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вдалося запустити OTA");
         return ESP_FAIL;
     }
 
     httpd_resp_set_type(req, "text/plain");
-    httpd_resp_sendstr(req, "OK: firmware received, OTA started asynchronously");
+    httpd_resp_sendstr(req, "OK: прошивку отримано, OTA запущено");
     ESP_LOGI(TAG, "Async Master OTA started, task will handle the update");
 
     return ESP_OK;
@@ -1449,7 +1449,7 @@ static void master_ota_task(void *param)
 static esp_err_t upload_slave_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0 || req->content_len > UART_OTA_MAX_SIZE) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size (max 2MB)");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний розмір прошивки (макс. 2 МБ)");
         return ESP_FAIL;
     }
 
@@ -1459,7 +1459,7 @@ static esp_err_t upload_slave_handler(httpd_req_t *req)
     uint8_t *firmware_buf = malloc(req->content_len);
     if (!firmware_buf) {
         ESP_LOGE(TAG, "Failed to allocate %d bytes for firmware", (int)req->content_len);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вистачило пам'яті");
         return ESP_FAIL;
     }
 
@@ -1484,7 +1484,7 @@ static esp_err_t upload_slave_handler(httpd_req_t *req)
             }
             ESP_LOGE(TAG, "Failed to receive firmware data");
             free(firmware_buf);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Помилка прийому даних");
             s_prog.active = false;
             return ESP_FAIL;
         }
@@ -1516,11 +1516,11 @@ static esp_err_t upload_to_storage_handler(httpd_req_t *req)
     /* Keep the image in the internal FAT partition (/storage) so it can be
        flashed later and is deleted only after a successful update. */
     if (req->content_len <= 0 || req->content_len > (2 * 1024 * 1024)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware size (max 2MB)");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний розмір прошивки (макс. 2 МБ)");
         return ESP_FAIL;
     }
     if (player_storage_init() != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Storage is not available");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Сховище недоступне");
         return ESP_FAIL;
     }
 
@@ -1528,7 +1528,7 @@ static esp_err_t upload_to_storage_handler(httpd_req_t *req)
     uint8_t *buf = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!buf) buf = heap_caps_malloc(total, MALLOC_CAP_8BIT);
     if (!buf) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вистачило пам'яті");
         return ESP_FAIL;
     }
 
@@ -1538,7 +1538,7 @@ static esp_err_t upload_to_storage_handler(httpd_req_t *req)
         if (r <= 0) {
             if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
             heap_caps_free(buf);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Помилка прийому даних");
             return ESP_FAIL;
         }
         got += (size_t)r;
@@ -1548,12 +1548,12 @@ static esp_err_t upload_to_storage_handler(httpd_req_t *req)
     heap_caps_free(buf);
 
     if (err != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Cannot write to storage");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Не вдалося записати у /storage");
         return ESP_FAIL;
     }
     ESP_LOGI(TAG, "Firmware saved to /storage/firmware.bin (%u bytes)", (unsigned)got);
     httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_sendstr(req, "Firmware saved to /storage/firmware.bin");
+    return httpd_resp_sendstr(req, "Прошивку збережено у /storage/firmware.bin");
 }
 
 
@@ -1565,7 +1565,7 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     // Send the log buffer
     char *response = malloc(LOG_BUFFER_SIZE + 1);
     if (!response) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory error");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Помилка пам'яті");
         return ESP_FAIL;
     }
     int pos = log_write_pos;
@@ -1640,7 +1640,7 @@ static esp_err_t verbose_logs_post_handler(httpd_req_t *req)
 
 static esp_err_t restart_handler(httpd_req_t *req)
 {
-    httpd_resp_sendstr(req, "Restarting device...");
+    httpd_resp_sendstr(req, "Пристрій перезавантажується…");
     vTaskDelay(pdMS_TO_TICKS(100)); // Give time to send response
     esp_restart();
     return ESP_OK; // Never reached
@@ -1821,7 +1821,7 @@ static esp_err_t elm327_config_post_handler(httpd_req_t *req)
     if (remaining < 0) remaining = 0;
     ret = httpd_req_recv(req, buf, remaining);
     if (ret <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Порожньо");
         return ESP_FAIL;
     }
     buf[ret] = 0;

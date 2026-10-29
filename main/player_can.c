@@ -85,7 +85,7 @@ esp_err_t change_can_bitrate(uint16_t new_bitrate_kbps)
     // Проверяем поддерживаемые скорости
     if (new_bitrate_kbps != 100 && new_bitrate_kbps != 125 && 
         new_bitrate_kbps != 250 && new_bitrate_kbps != 500 && new_bitrate_kbps != 1000) {
-        ESP_LOGE(TAG_CAN, "❌ Неподдерживаемая скорость CAN: %d kbps", new_bitrate_kbps);
+        ESP_LOGE(TAG_CAN, "❌ Непідтримувана швидкість CAN: %d kbps", new_bitrate_kbps);
         return ESP_ERR_INVALID_ARG;
     }
     
@@ -100,14 +100,14 @@ esp_err_t change_can_bitrate(uint16_t new_bitrate_kbps)
     // Останавливаем CAN
     esp_err_t ret = twai_stop();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG_CAN, "❌ Ошибка при остановке CAN: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG_CAN, "❌ Помилка зупинки CAN: %s", esp_err_to_name(ret));
         return ret;
     }
     
     // Деинициализируем драйвер
     ret = twai_driver_uninstall();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG_CAN, "❌ Ошибка при деинициализации CAN: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG_CAN, "❌ Помилка деініціалізації CAN: %s", esp_err_to_name(ret));
         return ret;
     }
     
@@ -117,7 +117,7 @@ esp_err_t change_can_bitrate(uint16_t new_bitrate_kbps)
     // Переинициализируем CAN с новой скоростью
     ret = init_can();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG_CAN, "❌ Ошибка при переинициализации CAN: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG_CAN, "❌ Помилка переініціалізації CAN: %s", esp_err_to_name(ret));
         return ret;
     }
     
@@ -170,7 +170,7 @@ void wifi_can_on_control_callback(uint8_t cmd, const uint8_t *data, uint8_t len)
                 if (ret == ESP_OK) {
                     ESP_LOGI(TAG_CAN, "✅ CAN bitrate успешно изменена на %d kbps через Wi-Fi", bitrate);
                 } else {
-                    ESP_LOGE(TAG_CAN, "❌ Ошибка изменения CAN bitrate: %s", esp_err_to_name(ret));
+                    ESP_LOGE(TAG_CAN, "❌ Помилка зміни бітрейту CAN: %s", esp_err_to_name(ret));
                 }
             }
             break;

@@ -908,13 +908,13 @@ if (g_board_handle) {
     // Получаем текущую громкость
     int current_volume = 0;
     audio_hal_get_volume(g_board_handle->audio_hal, &current_volume);
-    ESP_LOGI(TAG, "🔊 Текущая громкость аудиочипа: %d%%", current_volume);
+    ESP_LOGI(TAG, "🔊 Поточна гучність аудіочипа: %d%%", current_volume);
     
     // Устанавливаем нашу громкость
     audio_hal_set_volume(g_board_handle->audio_hal, g_volume);
     ESP_LOGI(TAG, "🔊 Установлена громкость: %d%%", g_volume);
 } else {
-    ESP_LOGW(TAG, "⚠️ Не удалось инициализировать аудиочип, громкость не регулируется");
+    ESP_LOGW(TAG, "⚠️ Не вдалося ініціалізувати аудіочип, гучність не регулюється");
 }
     // 🔍 Перевірка PSRAM (ESP-IDF v5.5.1)
 #if CONFIG_SPIRAM
@@ -1220,7 +1220,7 @@ if (g_board_handle) {
 
                     // Если сейчас не в режиме external, переключаемся на внешний вход
                     if (!g_mode_external) {
-                        ESP_LOGI(TAG, "🔀 Переключаемся на внешний вход");
+                        ESP_LOGI(TAG, "🔀 Перемикаємось на зовнішній вхід");
                         
                         // Сохраняем позицию текущего воспроизведения
                         if (g_player_task_handle != NULL) {
@@ -1235,7 +1235,7 @@ if (g_board_handle) {
                             // Зберігаємо вибір джерела як External
                             save_last_source_pref(1);
                         } else {
-                            ESP_LOGW(TAG, "⚠️ Не удалось запустить внешний вход");
+                            ESP_LOGW(TAG, "⚠️ Не вдалося запустити зовнішній вхід");
                         }
                     } else {
                         ESP_LOGI(TAG, "🔀 Возвращаемся к воспроизведению с флешки");

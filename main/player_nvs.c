@@ -79,7 +79,7 @@ static const char *TAG_NVS = "Player";
 esp_err_t save_playback_position(int32_t track_index, int32_t position_ms) {
     // 🚨 ВАЖНО: Проверяем что позиция корректная
     if (position_ms < 0 || position_ms > 3600000) { // Больше 1 часа - ошибка
-        ESP_LOGW(TAG_NVS, "⚠️ Подозрительная позиция для сохранения: %d мс", position_ms);
+        ESP_LOGW(TAG_NVS, "⚠️ Підозріла позиція для збереження: %d мс", position_ms);
         position_ms = 0;
     }
     

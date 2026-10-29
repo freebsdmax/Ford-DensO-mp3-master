@@ -100,7 +100,7 @@ void stop_external_input(void)
 #include "driver/twai.h"
 void stop_playback(void) {
     if (g_player_task_handle) {
-        ESP_LOGI(TAG_PIPE, "⏸️ Полная остановка воспроизведения");
+        ESP_LOGI(TAG_PIPE, "⏸️ Повна зупинка відтворення");
         
         // 1. 🛑 ПРИМУСОВА ЗУПИНКА - встановлюємо прапори зупинки
         bool old_playlist_ready = g_playlist_ready;
@@ -137,7 +137,7 @@ void stop_playback(void) {
         // 4. Відновлюємо стан плейлиста якщо він був готовий
         g_playlist_ready = old_playlist_ready;
         
-        ESP_LOGI(TAG_PIPE, "✅ Воспроизведение полностью остановлено");
+        ESP_LOGI(TAG_PIPE, "✅ Відтворення повністю зупинено");
     }
     g_skip_to_next = false;
     g_skip_to_prev = false;
@@ -371,11 +371,11 @@ void flush_audio_buffers(void) {
     vTaskDelay(pdMS_TO_TICKS(200));
     
     // Можно попробовать пересоздать аудио элементы
-    ESP_LOGI(TAG_PIPE, "✅ Аудио буферы очищены");
+    ESP_LOGI(TAG_PIPE, "✅ Аудіо-буфери очищено");
 }
 
 void cleanup_i2s_driver(void) {
-    ESP_LOGI(TAG_PIPE, "🧹 Упрощенная очистка I2S драйвера (перевірка g_mode_external)...");
+    ESP_LOGI(TAG_PIPE, "🧹 Спрощене очищення драйвера I2S (перевірка g_mode_external)…");
     if (g_mode_external) {
         ESP_LOGI(TAG_PIPE, "ℹ️ Зовнішній режим активний, викликаємо stop_external_input()...");
         stop_external_input();
@@ -383,7 +383,7 @@ void cleanup_i2s_driver(void) {
 }
 
 void safe_i2s_cleanup(void) {
-    ESP_LOGI(TAG_PIPE, "🧹 Безопасная очистка I2S...");
+    ESP_LOGI(TAG_PIPE, "🧹 Безпечне очищення I2S…");
     
     if (g_i2s_tx_handle != NULL) {
         // 🔧 Останавливаем канал
@@ -396,7 +396,7 @@ void safe_i2s_cleanup(void) {
         
         ESP_LOGI(TAG_PIPE, "✅ I2S канал остановлен и удален");
     } else {
-        ESP_LOGW(TAG_PIPE, "⚠️ I2S хэндл уже NULL, пропускаем очистку");
+        ESP_LOGW(TAG_PIPE, "⚠️ I2S-хендл вже NULL, очищення пропускаємо");
     }
     
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -449,7 +449,7 @@ esp_err_t start_external_input(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_LOGI(TAG_PIPE, "▶️ Запуск external input (низкоуровневый I2S passthrough)...");
+    ESP_LOGI(TAG_PIPE, "▶️ Запуск external input (низькорівневий I2S passthrough)…");
 
     // Создаём passthrough задачу на ядрі 1 (аудіо)
     g_mode_external = true;
@@ -995,7 +995,7 @@ void i2s_passthrough_task(void *pvParameters)
     
     // Включаємо pull-up на GPIO 40 (DIN) для стабільності
     gpio_set_pull_mode(EXT_I2S_DIN_PIN, GPIO_PULLUP_ONLY);
-    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG_PIPE, "✅ Pull-up включена на GPIO %d (DIN)", EXT_I2S_DIN_PIN);
+    if (g_verbose_logs && g_player_logs) ESP_LOGI(TAG_PIPE, "✅ Pull-up увімкнено на GPIO %d (DIN)", EXT_I2S_DIN_PIN);
     
     // 1. Низькорівневий I2S slave для читання (отримує clock ззовні)
     i2s_chan_config_t rx_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
@@ -1234,7 +1234,7 @@ void player_task(void *pvParam)
 
     // 🔄 Сброс флага восстановления если трек не совпадает
     if (g_restore_playback && g_current_track != g_saved_track_index) {
-        ESP_LOGW(TAG_PIPE, "⚠️ Запрошенный трек %d не совпадает с сохраненным %d", 
+        ESP_LOGW(TAG_PIPE, "⚠️ Запитаний трек %d не збігається зі збереженим %d", 
                  g_current_track, g_saved_track_index);
         g_restore_playback = false;
     }
