@@ -68,8 +68,6 @@ static void apply_task(void *arg)
                     if (err != ESP_OK) break;
                     off += n;
                     s_applied = off;
-                    /* Give the audio DMA a chance to refill between flash ops. */
-                    vTaskDelay(pdMS_TO_TICKS(3));
                 }
                 heap_caps_free(block);
             }
@@ -93,7 +91,6 @@ static void apply_task(void *arg)
                     if (err != ESP_OK) break;
                     off += n;
                     s_applied = off;
-                    vTaskDelay(pdMS_TO_TICKS(3));
                 }
                 if (err == ESP_OK) err = esp_ota_end(h);
                 if (err == ESP_OK) err = esp_ota_set_boot_partition(upd);

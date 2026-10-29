@@ -10,8 +10,6 @@
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
 #include "wear_levelling.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char *TAG = "STORAGE";
 static const char *BASE = "/storage";
@@ -92,17 +90,7 @@ esp_err_t player_storage_write_file(const char *name, const uint8_t *data, size_
         ESP_LOGE(TAG, "cannot open %s for writing", path);
         return ESP_FAIL;
     }
-    size_t written = 0;
-    const size_t chunk = 4096;
-    while (written < len) {
-        size_t n = (len - written) < chunk ? (len - written) : chunk;
-        size_t w = fwrite(data + written, 1, n, f);
-        written += w;
-        if (w != n) break;
-        fflush(f);
-        /* Spread the flash sector erases so a playing stream keeps its buffer. */
-        vTaskDelay(pdMS_TO_TICKS(2));
-    }
+    size_t written = fwrite(data, 1, len, f);
     fclose(f);
 
     if (written != len) {

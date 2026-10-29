@@ -999,10 +999,8 @@ void i2s_passthrough_task(void *pvParameters)
     
     // 1. Низькорівневий I2S slave для читання (отримує clock ззовні)
     i2s_chan_config_t rx_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
-    /* ~186 ms of buffering: a flash erase during an OTA stalls both cores for
-       tens of milliseconds, which used to overflow the old 6x512 DMA ring. */
-    rx_cfg.dma_desc_num = 8;
-    rx_cfg.dma_frame_num = 1024;
+    rx_cfg.dma_desc_num = 6;        // збільшуємо кількість DMA дескрипторів
+    rx_cfg.dma_frame_num = 512;     // збільшуємо розмір кадру
     
     i2s_chan_handle_t rx_handle = NULL;
     esp_err_t ret = i2s_new_channel(&rx_cfg, NULL, &rx_handle);
@@ -1075,10 +1073,6 @@ void i2s_passthrough_task(void *pvParameters)
     i2s_writer_cfg.std_cfg.clk_cfg.sample_rate_hz = 44100;
     i2s_writer_cfg.std_cfg.slot_cfg.data_bit_width = I2S_DATA_BIT_WIDTH_16BIT;
     i2s_writer_cfg.std_cfg.slot_cfg.slot_mode = I2S_SLOT_MODE_STEREO;
-    /* Same idea on the output side: absorb the cache-off stalls of an OTA. */
-    i2s_writer_cfg.chan_cfg.dma_desc_num = 8;
-    i2s_writer_cfg.chan_cfg.dma_frame_num = 1024;
-    i2s_writer_cfg.out_rb_size = 32 * 1024;
 
     audio_element_handle_t i2s_writer = i2s_stream_init(&i2s_writer_cfg);
     if (!i2s_writer) {
@@ -1304,9 +1298,6 @@ void player_task(void *pvParam)
         i2s_cfg.std_cfg.dma_desc_num = 8;
         i2s_cfg.std_cfg.dma_frame_num = 1024;
     #endif
-        /* Local playback also has to survive the flash stalls of an OTA. */
-        i2s_cfg.chan_cfg.dma_desc_num = 8;
-        i2s_cfg.chan_cfg.dma_frame_num = 1024;
         i2s_stream_writer = i2s_stream_init(&i2s_cfg);
         
         // 🎵 Створити декодер для MP3
