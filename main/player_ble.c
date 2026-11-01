@@ -6,6 +6,7 @@
 #include "player_logs.h"
 #include "player_slave.h"
 #include "player_media.h"
+#include "player_volume.h"
 #include "player_slave_ota.h"
 #include "player_file_ota.h"
 #include "player_ble_ota.h"
@@ -740,6 +741,22 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         cJSON_AddStringToObject(root, "slave_crc_build_time", sct);
         cJSON_AddStringToObject(root, "slave_uart_build_date", sud);
         cJSON_AddStringToObject(root, "slave_uart_build_time", sut);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "volume.get") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "volume", player_volume_get());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "volume.set") == 0 && payload) {
+        player_volume_set(atoi(payload));
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", true);
+        cJSON_AddNumberToObject(root, "volume", player_volume_get());
         return ble_rpc_return_json(root, response, response_size);
     }
 

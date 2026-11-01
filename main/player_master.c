@@ -93,7 +93,8 @@
 #include "player_logs.h"
 #include "player_slave.h"
 #include "player_media.h"
-#include "player_storage.h"     // Версія основного додатку
+#include "player_storage.h"
+#include "player_volume.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #include "elm327_emu.h"         // ELM327 емулятор для діагностики
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -669,12 +670,12 @@ char* get_player_status_json(void) {
              "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,"
              "\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s,"
              "\"media_valid\":%s,\"media_playing\":%s,\"media_pos\":%lu,\"media_dur\":%lu,"
-             "\"media_title\":\"%s\",\"media_artist\":\"%s\"}",
+             "\"media_title\":\"%s\",\"media_artist\":\"%s\",\"volume\":%d}",
              g_current_track, position_out, duration_ms, paused_out ? "true" : "false",
              g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false",
              media.valid ? "true" : "false", media.playing ? "true" : "false",
              (unsigned long)media.pos_ms, (unsigned long)media.dur_ms,
-             mtitle, martist);
+             mtitle, martist, player_volume_get());
 
     return json;
 }
@@ -945,6 +946,7 @@ if (g_board_handle) {
         // Ініціалізація UART master для відправки команд на зовнішній пристрій
         esp_err_t i2c_err = init_i2c_master();
     slave_version_start();
+    player_volume_load();
     player_media_start();
     player_storage_init();
         if (i2c_err != ESP_OK) {

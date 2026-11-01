@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "player_logs.h"
 #include "player_storage.h"
+#include "player_volume.h"
 #include "esp_heap_caps.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
@@ -403,6 +404,11 @@ static const char *INDEX_HTML =
 "      <button class='btn' onclick=\"playerCmd('next')\">⏭️ Далі</button>" 
 "      <button class='btn' onclick=\"playerCmd('switch_mode')\">🔄 Режим</button>" 
 "    </div>" 
+"    <div style='display:flex; align-items:center; gap:0.75rem; margin-bottom:1rem;'>"
+"      <span style='font-size:1.1rem;'>🔊</span>"
+"      <input type='range' id='volume' min='0' max='100' step='1' style='flex:1;'>"
+"      <span id='volume-label' style='min-width:3rem; text-align:right;'>80%</span>"
+"    </div>"
 "    <div id='player-status' class='status info' style='margin-bottom:1rem;'></div>"
 "    <div style='margin-bottom:1rem;'>"
 "      <input type='range' id='progress-bar' min='0' max='100' value='0'>"
@@ -567,6 +573,11 @@ static const char *INDEX_HTML =
 "  if (sn) sn.addEventListener('change', function(e){ setSnifferState(e.target.checked?1:0); });" 
 "});" 
 "let lastStatus = null;"
+"const volumeEl = document.getElementById('volume');"
+"if (volumeEl) {"
+"  volumeEl.oninput = function(){ document.getElementById('volume-label').textContent = this.value + '%'; };"
+"  volumeEl.onchange = function(){ fetch('/volume?value=' + this.value).catch(e=>console.log('Volume error:',e)); };"
+"}"
 "function updatePlayerStatus(){"
 "  fetch('/player_status').then(r=>r.json()).then(s=>{"
 "    lastStatus = s;"
@@ -608,6 +619,7 @@ static const char *INDEX_HTML =
 "      }"
 "    }" 
 "    try { var sn = document.getElementById('sniffer-enabled'); if (sn) sn.checked = !!s.sniffer_enabled; } catch(e){}" 
+"    try { if (volumeEl && document.activeElement !== volumeEl && typeof s.volume === 'number') { volumeEl.value = s.volume; document.getElementById('volume-label').textContent = s.volume + '%'; } } catch(e){}"
 "  }).catch(e=>{console.log('Error updating status:',e);});"
 "}"
 "setInterval(updatePlayerStatus, 1000);"
@@ -1001,6 +1013,22 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t volume_handler(httpd_req_t *req)
+{
+    char buf[64];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[8] = {0};
+        if (httpd_query_key_value(buf, "value", val, sizeof(val)) == ESP_OK) {
+            player_volume_set(atoi(val));
+        }
+    }
+
+    char resp[32];
+    snprintf(resp, sizeof(resp), "{\"volume\":%d}", player_volume_get());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t player_status_handler(httpd_req_t *req)
 {
     char *json = get_player_status_json();
@@ -1939,6 +1967,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t volume = {
+        .uri = "/volume",
+        .method = HTTP_GET,
+        .handler = volume_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t player_status = {
         .uri = "/player_status",
         .method = HTTP_GET,
@@ -2039,6 +2074,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &playlist);
     httpd_register_uri_handler(s_server, &player_cmd);
     httpd_register_uri_handler(s_server, &player_status);
+    httpd_register_uri_handler(s_server, &volume);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);

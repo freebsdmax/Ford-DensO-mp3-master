@@ -148,6 +148,7 @@ void stop_playback(void) {
 #include "player_wifi.h"
 #include "uart_ota_protocol.h"
 #include "player_link.h"
+#include "player_volume.h"
 #include "player_media.h"
 
 /**
@@ -1157,7 +1158,10 @@ void i2s_passthrough_task(void *pvParameters)
                 first_data = true;
             }
             total_read += bytes_read;
-            
+
+            /* Software volume for the external (Bluetooth) source too. */
+            player_volume_apply_i16(buffer, bytes_read);
+
             int written = audio_element_output(i2s_writer, (char*)buffer, bytes_read);
             if (written > 0) {
                 total_write += written;
@@ -1245,6 +1249,7 @@ void player_task(void *pvParam)
     while (g_playlist_ready && g_playlist_size > 0 && g_usb_mounted) {
         audio_pipeline_handle_t pipeline = NULL;
         audio_element_handle_t fatfs_stream_reader = NULL, i2s_stream_writer = NULL, decoder = NULL;
+        audio_element_handle_t volume_stream = NULL;
         bool playback_finished = false;
         
         // 🔄 Скидаємо прапор помилки декодера на початку кожного треку
@@ -1304,7 +1309,10 @@ void player_task(void *pvParam)
         mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
         decoder = mp3_decoder_init(&mp3_cfg);
 
-        if (!fatfs_stream_reader || !i2s_stream_writer || !decoder) {
+        /* Software volume: PCM5102 has no hardware volume control. */
+        volume_stream = volume_stream_init();
+
+        if (!fatfs_stream_reader || !i2s_stream_writer || !decoder || !volume_stream) {
             ESP_LOGE(TAG_PIPE, "❌ Не вдалося створити аудіо елементи");
             goto cleanup;
         }
@@ -1312,10 +1320,11 @@ void player_task(void *pvParam)
         // 📝 Зареєструвати та зв'язати елементи
         audio_pipeline_register(pipeline, fatfs_stream_reader, "file");
         audio_pipeline_register(pipeline, decoder, "decoder");
+        audio_pipeline_register(pipeline, volume_stream, "volume");
         audio_pipeline_register(pipeline, i2s_stream_writer, "i2s");
 
-        const char *link_tag[3] = {"file", "decoder", "i2s"};
-        audio_pipeline_link(pipeline, &link_tag[0], 3);
+        const char *link_tag[4] = {"file", "decoder", "volume", "i2s"};
+        audio_pipeline_link(pipeline, &link_tag[0], 4);
         
         // 🎯 Встановити URI
         audio_element_set_uri(fatfs_stream_reader, g_playlist[g_current_track]);
@@ -1687,12 +1696,14 @@ cleanup:
             
             audio_pipeline_unregister(pipeline, fatfs_stream_reader);
             audio_pipeline_unregister(pipeline, decoder);
+            if (volume_stream) audio_pipeline_unregister(pipeline, volume_stream);
             audio_pipeline_unregister(pipeline, i2s_stream_writer);
             audio_pipeline_deinit(pipeline);
         }
         
         if (fatfs_stream_reader) audio_element_deinit(fatfs_stream_reader);
         if (decoder) audio_element_deinit(decoder);
+        if (volume_stream) audio_element_deinit(volume_stream);
         if (i2s_stream_writer) audio_element_deinit(i2s_stream_writer);
 
 next_track:
