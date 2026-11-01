@@ -3,6 +3,8 @@
 #include "player_nvs.h"
 #include "player_usb.h"
 #include "esp_log.h"
+#include "player_tags.h"
+#include "esp_heap_caps.h"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <string.h>
@@ -13,9 +15,46 @@
 static const char *TAG = "Player";
 
 char **g_playlist = NULL;
+/* Назви для показу (ID3 «Виконавець — Назва», інакше ім'я файлу). PSRAM. */
+static char **s_display = NULL;
 int g_playlist_size = 0;
 bool g_playlist_ready = false;
 int g_current_track = 0;
+
+/* Формує назву для показу: ID3-теги, інакше ім'я файлу без шляху та розширення. */
+static void build_display_name(const char *path, char *dst, size_t cap)
+{
+    char title[96] = {0};
+    char artist[64] = {0};
+
+    if (player_tags_read(path, title, sizeof(title), artist, sizeof(artist)) &&
+        (title[0] || artist[0])) {
+        if (title[0] && artist[0]) {
+            snprintf(dst, cap, "%s — %s", artist, title);
+        } else {
+            snprintf(dst, cap, "%s", title[0] ? title : artist);
+        }
+        return;
+    }
+
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    char tmp[256];
+    cp866_to_utf8(base, tmp, sizeof(tmp));
+    char *dot = strrchr(tmp, '.');
+    if (dot) *dot = '\0';
+    /* обрізаємо до dst, щоб не було попередження про переповнення */
+    snprintf(dst, cap, "%.*s", (int)(cap - 1), tmp);
+}
+
+static char *dup_display(const char *text)
+{
+    size_t n = strlen(text) + 1;
+    char *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p) p = heap_caps_malloc(n, MALLOC_CAP_8BIT);
+    if (p) memcpy(p, text, n);
+    return p;
+}
 
 void add_to_playlist(const char *file_path) {
     if (g_playlist_size >= MAX_PLAYLIST_SIZE) {
@@ -34,6 +73,24 @@ void add_to_playlist(const char *file_path) {
         return;
     }
 
+    /* паралельний масив назв для показу */
+    char **grown = heap_caps_malloc((g_playlist_size + 1) * sizeof(char *),
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!grown) grown = heap_caps_malloc((g_playlist_size + 1) * sizeof(char *), MALLOC_CAP_8BIT);
+    if (grown) {
+        if (s_display && g_playlist_size > 0) {
+            memcpy(grown, s_display, g_playlist_size * sizeof(char *));
+            heap_caps_free(s_display);
+        }
+        s_display = grown;
+    }
+
+    char disp[160];
+    build_display_name(file_path, disp, sizeof(disp));
+    if (s_display) {
+        s_display[g_playlist_size] = dup_display(disp);
+    }
+
     g_playlist[g_playlist_size] = strdup(file_path);
     g_playlist_size++;
 }
@@ -45,6 +102,13 @@ void clear_playlist(void) {
         }
         free(g_playlist);
         g_playlist = NULL;
+    }
+    if (s_display) {
+        for (int i = 0; i < g_playlist_size; i++) {
+            if (s_display[i]) heap_caps_free(s_display[i]);
+        }
+        heap_caps_free(s_display);
+        s_display = NULL;
     }
     g_playlist_size = 0;
     g_current_track = 0;
@@ -277,6 +341,10 @@ void playlist_get_display_name(int idx, char *dst, size_t dst_len)
     if (!dst || dst_len == 0) return;
     dst[0] = '\0';
     if (idx < 0 || idx >= g_playlist_size || !g_playlist[idx]) return;
+    if (s_display && s_display[idx] && s_display[idx][0]) {
+        strlcpy(dst, s_display[idx], dst_len);
+        return;
+    }
     const char *base = strrchr(g_playlist[idx], '/');
     base = base ? base + 1 : g_playlist[idx];
     cp866_to_utf8(base, dst, dst_len);
