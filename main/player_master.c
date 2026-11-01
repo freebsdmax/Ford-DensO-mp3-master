@@ -96,6 +96,8 @@
 #include "player_storage.h"
 #include "player_volume.h"
 #include "player_auth.h"
+#include "player_audio_cfg.h"
+#include "player_net.h"
 #include "player_logfile.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #include "elm327_emu.h"         // ELM327 емулятор для діагностики
@@ -952,6 +954,8 @@ if (g_board_handle) {
     player_auth_load();
     player_volume_load();
     player_seek_load();
+    player_audio_cfg_load();
+    player_net_load();
     player_media_start();
     player_logfile_start();
     /* Slave does not keep this in NVS - push it after the UART is ready. */

@@ -14,6 +14,8 @@
 #include "player_auth.h"
 #include "ble_player_service.h"
 #include "player_logfile.h"
+#include "player_audio_cfg.h"
+#include "player_net.h"
 #include "nvs.h"
 #include "app_messages.h"
 #include "cJSON.h"
@@ -803,6 +805,33 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "success", true);
         cJSON_AddNumberToObject(root, "volume", player_volume_get());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "audio.get") == 0) {
+        uint32_t desc = 0, frame = 0;
+        player_audio_cfg_rx(&desc, &frame);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "profile", player_audio_cfg_profile());
+        cJSON_AddNumberToObject(root, "rx_desc", (double)desc);
+        cJSON_AddNumberToObject(root, "rx_frame", (double)frame);
+        cJSON_AddNumberToObject(root, "rx_ms", (double)(desc * frame / 44.1));
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "audio.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *p = j ? cJSON_GetObjectItemCaseSensitive(j, "profile") : NULL;
+        esp_err_t err = cJSON_IsNumber(p)
+                            ? player_audio_cfg_set_profile((uint8_t)p->valueint)
+                            : ESP_ERR_INVALID_ARG;
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddBoolToObject(root, "reboot_required", err == ESP_OK);
+        cJSON_AddNumberToObject(root, "profile", player_audio_cfg_profile());
         return ble_rpc_return_json(root, response, response_size);
     }
 

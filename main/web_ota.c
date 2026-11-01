@@ -13,6 +13,7 @@
 #include "player_ble.h"
 #include "player_logfile.h"
 #include "player_audio_cfg.h"
+#include "player_net.h"
 #include "player_media.h"
 #include "player_can.h"
 #include "esp_heap_caps.h"
@@ -575,6 +576,17 @@ static const char *INDEX_HTML =
 "    </form>"
 "  </div>"
 "  <div class='section'>"
+"    <h3>🌐 Мережа (STA)</h3>"
+"    <label><input type='checkbox' id='net-static'> Статична IP</label><br>"
+"    <label>IP:</label> <input type='text' id='net-ip' placeholder='192.168.1.50'><br>"
+"    <label>Шлюз:</label> <input type='text' id='net-gw' placeholder='192.168.1.1'><br>"
+"    <label>Маска:</label> <input type='text' id='net-mask' value='255.255.255.0'><br>"
+"    <label>DNS 1:</label> <input type='text' id='net-dns1' placeholder='8.8.8.8'><br>"
+"    <label>DNS 2:</label> <input type='text' id='net-dns2'><br><br>"
+"    <button class='btn' type='button' onclick='saveNetSettings()'>Зберегти</button>"
+"    <div id='net-status' style='margin-top:1rem;color:#06c;'></div>"
+"  </div>"
+"  <div class='section'>"
 "    <h3>🎚️ Аудіо-буфери (Bluetooth)</h3>"
 "    <label>Профіль:</label><br>"
 "    <select id='audio-profile'>"
@@ -841,6 +853,27 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function loadNetSettings(){"
+"  fetch('/net_settings').then(r=>r.json()).then(s=>{"
+"    document.getElementById('net-static').checked = !!s.static;"
+"    document.getElementById('net-ip').value = s.ip;"
+"    document.getElementById('net-gw').value = s.gw;"
+"    document.getElementById('net-mask').value = s.mask;"
+"    document.getElementById('net-dns1').value = s.dns1;"
+"    document.getElementById('net-dns2').value = s.dns2;"
+"  }).catch(e=>console.log('Net load error:',e));"
+"}"
+"function saveNetSettings(){"
+"  const q = '?static=' + (document.getElementById('net-static').checked ? 1 : 0)"
+"    + '&ip=' + encodeURIComponent(document.getElementById('net-ip').value)"
+"    + '&gw=' + encodeURIComponent(document.getElementById('net-gw').value)"
+"    + '&mask=' + encodeURIComponent(document.getElementById('net-mask').value)"
+"    + '&dns1=' + encodeURIComponent(document.getElementById('net-dns1').value)"
+"    + '&dns2=' + encodeURIComponent(document.getElementById('net-dns2').value);"
+"  fetch('/net_settings' + q).then(r=>r.json()).then(s=>{"
+"    document.getElementById('net-status').textContent = 'Збережено (застосується після перезавантаження)';"
+"  }).catch(e=>{document.getElementById('net-status').textContent = 'Помилка';});"
+"}"
 "function loadAudioProfile(){"
 "  fetch('/audio_profile').then(r=>r.json()).then(s=>{"
 "    document.getElementById('audio-profile').value = s.profile;"
@@ -1052,7 +1085,7 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName(); loadLogsConfig(); loadAudioProfile();}catch(e){} };"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName(); loadLogsConfig(); loadAudioProfile(); loadNetSettings();}catch(e){} };"
 "</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
@@ -1280,6 +1313,33 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t net_settings_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+
+    player_net_cfg_t cfg;
+    player_net_get(&cfg);
+
+    char buf[256];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[32];
+        if (httpd_query_key_value(buf, "static", val, sizeof(val)) == ESP_OK) cfg.use_static = (atoi(val) != 0);
+        if (httpd_query_key_value(buf, "ip", val, sizeof(val)) == ESP_OK) strlcpy(cfg.ip, val, sizeof(cfg.ip));
+        if (httpd_query_key_value(buf, "gw", val, sizeof(val)) == ESP_OK) strlcpy(cfg.gw, val, sizeof(cfg.gw));
+        if (httpd_query_key_value(buf, "mask", val, sizeof(val)) == ESP_OK) strlcpy(cfg.mask, val, sizeof(cfg.mask));
+        if (httpd_query_key_value(buf, "dns1", val, sizeof(val)) == ESP_OK) strlcpy(cfg.dns1, val, sizeof(cfg.dns1));
+        if (httpd_query_key_value(buf, "dns2", val, sizeof(val)) == ESP_OK) strlcpy(cfg.dns2, val, sizeof(cfg.dns2));
+        player_net_set(&cfg);
+    }
+
+    char resp[256];
+    snprintf(resp, sizeof(resp),
+             "{\"static\":%s,\"ip\":\"%s\",\"gw\":\"%s\",\"mask\":\"%s\",\"dns1\":\"%s\",\"dns2\":\"%s\",\"reboot_required\":true}",
+             cfg.use_static ? "true" : "false", cfg.ip, cfg.gw, cfg.mask, cfg.dns1, cfg.dns2);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t audio_profile_handler(httpd_req_t *req)
 {
     REQUIRE_AUTH(req);
@@ -2378,6 +2438,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t net_settings = {
+        .uri = "/net_settings",
+        .method = HTTP_GET,
+        .handler = net_settings_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t audio_profile = {
         .uri = "/audio_profile",
         .method = HTTP_GET,
@@ -2526,6 +2593,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &ble_settings);
     httpd_register_uri_handler(s_server, &logs_config);
     httpd_register_uri_handler(s_server, &audio_profile);
+    httpd_register_uri_handler(s_server, &net_settings);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);

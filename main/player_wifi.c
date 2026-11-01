@@ -1,6 +1,7 @@
 #include "player_wifi.h"
 #include "player_nvs.h"
 #include "player_ble.h"
+#include "player_net.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_wifi.h"
@@ -104,6 +105,13 @@ void sta_connection_task(void *arg)
         return;
     }
     
+    /* Статична IP (якщо увімкнена) - до очікування DHCP. */
+    esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta_netif) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        player_net_apply_static(sta_netif);
+    }
+
     // Чекати підключення до 15 секунд (збільшено для DHCP)
     ESP_LOGI(TAG_WIFI, "⏳ STA підключення: очікування 15 сек...");
     vTaskDelay(pdMS_TO_TICKS(15000));
