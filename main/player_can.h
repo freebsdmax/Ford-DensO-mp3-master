@@ -13,7 +13,7 @@
 #define CAN_MODE TWAI_MODE_NORMAL
 #define CAN_TX_GPIO GPIO_NUM_4
 #define CAN_RX_GPIO GPIO_NUM_15
-#define CAN_COMMAND_DEBOUNCE_MS 500
+#define CAN_COMMAND_DEBOUNCE_MS 500   /* типове значення, змінюється в налаштуваннях */
 #define CAN_SLEEP_CHECK_PERIOD 1000
 extern uint32_t g_last_next_command_time;
 extern uint32_t g_last_prev_command_time;
@@ -31,6 +31,11 @@ extern uint64_t g_can_total_frames;
 extern uint64_t g_can_total_bytes;
 
 esp_err_t init_can(void);
+void player_can_load_settings(void);
+bool player_can_get_settings(uint16_t *bitrate, uint32_t *id,
+                             uint8_t *mn, uint8_t *mp, uint8_t *mm, uint16_t *debounce);
+esp_err_t player_can_set_settings(uint16_t bitrate, uint32_t id,
+                                  uint8_t mn, uint8_t mp, uint8_t mm, uint16_t debounce);
 void can_task(void *arg);
 void can_sleep_monitor_task(void *arg);
 void process_can_message(twai_message_t *message);

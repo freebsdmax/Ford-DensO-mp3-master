@@ -760,6 +760,49 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         return ble_rpc_return_json(root, response, response_size);
     }
 
+    if (strcmp(request_copy, "can.get") == 0) {
+        uint16_t bitrate = 0, debounce = 0;
+        uint32_t id = 0;
+        uint8_t mn = 0, mp = 0, mm = 0;
+        player_can_get_settings(&bitrate, &id, &mn, &mp, &mm, &debounce);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "bitrate", bitrate);
+        cJSON_AddNumberToObject(root, "id", (double)id);
+        cJSON_AddNumberToObject(root, "mask_next", mn);
+        cJSON_AddNumberToObject(root, "mask_prev", mp);
+        cJSON_AddNumberToObject(root, "mask_mode", mm);
+        cJSON_AddNumberToObject(root, "debounce_ms", debounce);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "can.set") == 0 && payload) {
+        uint16_t bitrate = 0, debounce = 0;
+        uint32_t id = 0;
+        uint8_t mn = 0, mp = 0, mm = 0;
+        player_can_get_settings(&bitrate, &id, &mn, &mp, &mm, &debounce);
+
+        cJSON *j = cJSON_Parse(payload);
+        if (j) {
+            const cJSON *v;
+            if ((v = cJSON_GetObjectItemCaseSensitive(j, "bitrate")) && cJSON_IsNumber(v)) bitrate = (uint16_t)v->valueint;
+            if ((v = cJSON_GetObjectItemCaseSensitive(j, "id")) && cJSON_IsNumber(v)) id = (uint32_t)v->valuedouble;
+            if ((v = cJSON_GetObjectItemCaseSensitive(j, "mask_next")) && cJSON_IsNumber(v)) mn = (uint8_t)v->valueint;
+            if ((v = cJSON_GetObjectItemCaseSensitive(j, "mask_prev")) && cJSON_IsNumber(v)) mp = (uint8_t)v->valueint;
+            if ((v = cJSON_GetObjectItemCaseSensitive(j, "mask_mode")) && cJSON_IsNumber(v)) mm = (uint8_t)v->valueint;
+            if ((v = cJSON_GetObjectItemCaseSensitive(j, "debounce_ms")) && cJSON_IsNumber(v)) debounce = (uint16_t)v->valueint;
+            cJSON_Delete(j);
+        }
+
+        esp_err_t err = player_can_set_settings(bitrate, id, mn, mp, mm, debounce);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddStringToObject(root, "error", err == ESP_OK ? "" : esp_err_to_name(err));
+        cJSON_AddNumberToObject(root, "bitrate", bitrate);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
     if (strcmp(request_copy, "seek.get") == 0) {
         cJSON *root = cJSON_CreateObject();
         if (!root) return 0;

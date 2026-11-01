@@ -8,6 +8,7 @@
 #include "player_nvs.h"
 #include "app_messages.h"
 #include "esp_log.h"
+#include "nvs.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -30,10 +31,102 @@ void wakeup_from_sleep(void);
 
 
 
+/* ---- Налаштування CAN (NVS: audio_player) ---- */
+uint32_t g_can_main_id = CAN_ID_MAIN;
+uint8_t g_can_mask_next = 0x40;
+uint8_t g_can_mask_prev = 0x80;
+uint8_t g_can_mask_mode = 0x10;
+uint16_t g_can_debounce_ms = 500;
+
+static void can_save_settings(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u16(h, "can_bitrate", g_can_bitrate);
+        nvs_set_u32(h, "can_id", g_can_main_id);
+        nvs_set_u8(h, "can_mn", g_can_mask_next);
+        nvs_set_u8(h, "can_mp", g_can_mask_prev);
+        nvs_set_u8(h, "can_mm", g_can_mask_mode);
+        nvs_set_u16(h, "can_deb", g_can_debounce_ms);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void player_can_load_settings(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
+        uint16_t v16 = 0;
+        uint32_t v32 = 0;
+        uint8_t v8 = 0;
+
+        if (nvs_get_u16(h, "can_bitrate", &v16) == ESP_OK &&
+            (v16 == 100 || v16 == 125 || v16 == 250 || v16 == 500 || v16 == 1000)) {
+            g_can_bitrate = v16;
+        }
+        if (nvs_get_u32(h, "can_id", &v32) == ESP_OK && v32 <= 0x1FFFFFFF) {
+            g_can_main_id = v32;
+        }
+        if (nvs_get_u8(h, "can_mn", &v8) == ESP_OK) g_can_mask_next = v8;
+        if (nvs_get_u8(h, "can_mp", &v8) == ESP_OK) g_can_mask_prev = v8;
+        if (nvs_get_u8(h, "can_mm", &v8) == ESP_OK) g_can_mask_mode = v8;
+        if (nvs_get_u16(h, "can_deb", &v16) == ESP_OK && v16 >= 50 && v16 <= 2000) {
+            g_can_debounce_ms = v16;
+        }
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG_CAN, "CAN config: %u kbps, ID=0x%03X, masks 0x%02X/0x%02X/0x%02X, debounce %u ms",
+             (unsigned)g_can_bitrate, (unsigned)g_can_main_id,
+             g_can_mask_next, g_can_mask_prev, g_can_mask_mode, (unsigned)g_can_debounce_ms);
+}
+
+bool player_can_get_settings(uint16_t *bitrate, uint32_t *id,
+                             uint8_t *mn, uint8_t *mp, uint8_t *mm, uint16_t *debounce)
+{
+    if (bitrate) *bitrate = g_can_bitrate;
+    if (id) *id = g_can_main_id;
+    if (mn) *mn = g_can_mask_next;
+    if (mp) *mp = g_can_mask_prev;
+    if (mm) *mm = g_can_mask_mode;
+    if (debounce) *debounce = g_can_debounce_ms;
+    return true;
+}
+
+esp_err_t player_can_set_settings(uint16_t bitrate, uint32_t id,
+                                  uint8_t mn, uint8_t mp, uint8_t mm, uint16_t debounce)
+{
+    if (id > 0x1FFFFFFF) return ESP_ERR_INVALID_ARG;
+    if (debounce < 50) debounce = 50;
+    if (debounce > 2000) debounce = 2000;
+
+    bool bitrate_changed = (bitrate != g_can_bitrate) &&
+                           (bitrate == 100 || bitrate == 125 || bitrate == 250 ||
+                            bitrate == 500 || bitrate == 1000);
+
+    g_can_main_id = id;
+    g_can_mask_next = mn;
+    g_can_mask_prev = mp;
+    g_can_mask_mode = mm;
+    g_can_debounce_ms = debounce;
+
+    esp_err_t err = ESP_OK;
+    if (bitrate_changed) {
+        err = change_can_bitrate(bitrate);
+        if (err != ESP_OK) return err;
+    }
+
+    can_save_settings();
+    ESP_LOGI(TAG_CAN, "CAN config saved: %u kbps, ID=0x%03X, masks 0x%02X/0x%02X/0x%02X, debounce %u",
+             (unsigned)g_can_bitrate, (unsigned)g_can_main_id,
+             g_can_mask_next, g_can_mask_prev, g_can_mask_mode, (unsigned)g_can_debounce_ms);
+    return ESP_OK;
+}
+
 void send_can_event(uint8_t event_type, uint8_t data1, uint8_t data2)
 {
     twai_message_t message;
-    message.identifier = CAN_ID_MAIN;
+    message.identifier = g_can_main_id;
     message.flags = TWAI_MSG_FLAG_NONE;
     message.data_length_code = 4;
     
@@ -56,7 +149,7 @@ void send_can_event(uint8_t event_type, uint8_t data1, uint8_t data2)
 void send_can_status(void)
 {
     twai_message_t message;
-    message.identifier = CAN_ID_MAIN;
+    message.identifier = g_can_main_id;
     message.flags = TWAI_MSG_FLAG_NONE;
     message.data_length_code = 4;
     
@@ -204,12 +297,17 @@ void process_can_message(twai_message_t *message)
     app_message_t app_msg;
     
     // 🔍 Перевіряємо основний ID і перший байт даних
-    if (message->identifier == CAN_ID_MAIN && 
-        message->data_length_code >= 2 && 
+    if (message->identifier == g_can_main_id &&
+        message->data_length_code >= 2 &&
         (message->data[0] & 0xF0) == 0x00) {  // data[0] в диапазоне 0x0x (0x00-0x0F)
         
         uint8_t cmd = message->data[1];
         uint8_t cmd_masked = cmd & 0xF0;  // Маскуємо молодші біти (останній символ)
+
+        /* Налаштовувані маски: зводимо до канонічних значень 0x40/0x80/0x10. */
+        if (cmd_masked == g_can_mask_next)      cmd_masked = 0x40;
+        else if (cmd_masked == g_can_mask_prev) cmd_masked = 0x80;
+        else if (cmd_masked == g_can_mask_mode) cmd_masked = 0x10;
         
         switch (cmd_masked) {
             case 0x40:  // NEXT_TRACK (0x4x, де x може бути будь-чим)
@@ -224,9 +322,9 @@ void process_can_message(twai_message_t *message)
                     uint32_t time_since_last = current_time - g_last_next_command_time;
                     
                     // Перевіряємо debounce - ігноруємо якщо команда прийшла занадто швидко
-                    if (time_since_last < CAN_COMMAND_DEBOUNCE_MS) {
+                    if (time_since_last < g_can_debounce_ms) {
                         ESP_LOGW(TAG_CAN, "⏭️ CAN: NEXT команда ігнорується (debounce: %lu мс < %d мс)", 
-                                time_since_last, CAN_COMMAND_DEBOUNCE_MS);
+                                time_since_last, g_can_debounce_ms);
                         break;
                     }
                     
@@ -259,9 +357,9 @@ void process_can_message(twai_message_t *message)
                     uint32_t time_since_last = current_time - g_last_prev_command_time;
                     
                     // Перевіряємо debounce - ігноруємо якщо команда прийшла занадто швидко
-                    if (time_since_last < CAN_COMMAND_DEBOUNCE_MS) {
+                    if (time_since_last < g_can_debounce_ms) {
                         ESP_LOGW(TAG_CAN, "⏮️ CAN: PREV команда ігнорується (debounce: %lu мс < %d мс)", 
-                                time_since_last, CAN_COMMAND_DEBOUNCE_MS);
+                                time_since_last, g_can_debounce_ms);
                         break;
                     }
                     
@@ -339,7 +437,7 @@ void can_task(void *arg)
             
             // 🎯 Обробляємо тільки якщо не в режимі сну або якщо це команда пробудження
             if (!g_can_sleep_mode || 
-                (message.identifier == CAN_ID_MAIN && message.data[0] == 0x01)) {
+                (message.identifier == g_can_main_id && message.data[0] == 0x01)) {
                 process_can_message(&message);
             }
         } else if (ret != ESP_ERR_TIMEOUT) {
@@ -474,9 +572,9 @@ void can_sleep_monitor_task(void *arg)
 esp_err_t init_can(void)
 {
     
-    // 🔄 Всегда сбрасываем на стандартную скорость 125 kbps при инициализации
-    g_can_bitrate = CAN_DEFAULT_BITRATE;
-    ESP_LOGI(TAG_CAN, "   📍 Скорость CAN установлена на: %d кбит/с", g_can_bitrate);
+    /* Швидкість береться з NVS (player_can_load_settings), 125 kbps за замовчуванням. */
+    if (g_can_bitrate == 0) g_can_bitrate = CAN_DEFAULT_BITRATE;
+    ESP_LOGI(TAG_CAN, "   📍 Скорость CAN: %d кбит/с", g_can_bitrate);
     
     // Get timing config based on global bitrate
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_GPIO, CAN_RX_GPIO, CAN_MODE);

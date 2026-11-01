@@ -941,6 +941,7 @@ if (g_board_handle) {
     
     // === КРИТЕРІЙ 4: Перевір що CAN ініціалізується тільки тут ===
     ESP_LOGI(TAG, "🔌 Ініціалізація CAN...");
+    player_can_load_settings();
     esp_err_t can_err = init_can();
     if (can_err == ESP_OK) {
         // Ініціалізація UART master для відправки команд на зовнішній пристрій

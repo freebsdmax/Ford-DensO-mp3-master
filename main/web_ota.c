@@ -10,6 +10,7 @@
 #include "player_storage.h"
 #include "player_volume.h"
 #include "player_media.h"
+#include "player_can.h"
 #include "esp_heap_caps.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
@@ -481,6 +482,25 @@ static const char *INDEX_HTML =
 "    </form>"
 "  </div>"
 "  <div class='section'>"
+"    <h3>🚗 CAN-шина</h3>"
+"    <label>Швидкість:</label><br>"
+"    <select id='can-bitrate'>"
+"      <option value='125'>125 кбіт/с</option>"
+"      <option value='250'>250 кбіт/с</option>"
+"      <option value='500'>500 кбіт/с</option>"
+"    </select><br>"
+"    <label>ID кнопок (hex):</label><br>"
+"    <input type='text' id='can-id' value='0x2D5'><br>"
+"    <label>Маска NEXT / PREV / MODE (hex):</label><br>"
+"    <input type='text' id='can-mn' value='0x40' style='width:5rem;'>"
+"    <input type='text' id='can-mp' value='0x80' style='width:5rem;'>"
+"    <input type='text' id='can-mm' value='0x10' style='width:5rem;'><br>"
+"    <label>Антибрязкіт (мс):</label><br>"
+"    <input type='number' id='can-debounce' min='50' max='2000' value='500'><br><br>"
+"    <button class='btn' type='button' onclick='saveCanSettings()'>Зберегти</button>"
+"    <div id='can-status' style='margin-top:1rem;color:#06c;'></div>"
+"  </div>"
+"  <div class='section'>"
 "    <h3>⏩ Перемотка (Bluetooth)</h3>"
 "    <label>Крок одного натискання:</label><br>"
 "    <select id='seek-step'>"
@@ -677,6 +697,27 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function loadCanSettings(){"
+"  fetch('/can_settings').then(r=>r.json()).then(s=>{"
+"    document.getElementById('can-bitrate').value = s.bitrate;"
+"    document.getElementById('can-id').value = '0x' + s.id.toString(16).toUpperCase();"
+"    document.getElementById('can-mn').value = '0x' + s.mask_next.toString(16).toUpperCase();"
+"    document.getElementById('can-mp').value = '0x' + s.mask_prev.toString(16).toUpperCase();"
+"    document.getElementById('can-mm').value = '0x' + s.mask_mode.toString(16).toUpperCase();"
+"    document.getElementById('can-debounce').value = s.debounce_ms;"
+"  }).catch(e=>console.log('CAN load error:',e));"
+"}"
+"function saveCanSettings(){"
+"  const q = '?bitrate=' + document.getElementById('can-bitrate').value"
+"    + '&id=' + encodeURIComponent(document.getElementById('can-id').value)"
+"    + '&mn=' + encodeURIComponent(document.getElementById('can-mn').value)"
+"    + '&mp=' + encodeURIComponent(document.getElementById('can-mp').value)"
+"    + '&mm=' + encodeURIComponent(document.getElementById('can-mm').value)"
+"    + '&debounce=' + document.getElementById('can-debounce').value;"
+"  fetch('/can_settings' + q).then(r=>r.json()).then(s=>{"
+"    document.getElementById('can-status').textContent = 'Збережено: ' + s.bitrate + ' кбіт/с, ID=0x' + s.id.toString(16).toUpperCase();"
+"  }).catch(e=>{document.getElementById('can-status').textContent = 'Помилка';});"
+"}"
 "function loadSeekSettings(){"
 "  fetch('/seek_settings').then(r=>r.json()).then(s=>{"
 "    document.getElementById('seek-step').value = s.step_s;"
@@ -831,7 +872,7 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings();}catch(e){} };"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings();}catch(e){} };"
 "</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
@@ -1045,6 +1086,39 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t can_settings_handler(httpd_req_t *req)
+{
+    char buf[192];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[16];
+        uint16_t bitrate = 0, debounce = 0;
+        uint32_t id = 0;
+        uint8_t mn = 0, mp = 0, mm = 0;
+        player_can_get_settings(&bitrate, &id, &mn, &mp, &mm, &debounce);
+
+        if (httpd_query_key_value(buf, "bitrate", val, sizeof(val)) == ESP_OK) bitrate = (uint16_t)atoi(val);
+        if (httpd_query_key_value(buf, "id", val, sizeof(val)) == ESP_OK) id = (uint32_t)strtoul(val, NULL, 0);
+        if (httpd_query_key_value(buf, "mn", val, sizeof(val)) == ESP_OK) mn = (uint8_t)strtoul(val, NULL, 0);
+        if (httpd_query_key_value(buf, "mp", val, sizeof(val)) == ESP_OK) mp = (uint8_t)strtoul(val, NULL, 0);
+        if (httpd_query_key_value(buf, "mm", val, sizeof(val)) == ESP_OK) mm = (uint8_t)strtoul(val, NULL, 0);
+        if (httpd_query_key_value(buf, "debounce", val, sizeof(val)) == ESP_OK) debounce = (uint16_t)atoi(val);
+
+        player_can_set_settings(bitrate, id, mn, mp, mm, debounce);
+    }
+
+    uint16_t bitrate = 0, debounce = 0;
+    uint32_t id = 0;
+    uint8_t mn = 0, mp = 0, mm = 0;
+    player_can_get_settings(&bitrate, &id, &mn, &mp, &mm, &debounce);
+
+    char resp[192];
+    snprintf(resp, sizeof(resp),
+             "{\"bitrate\":%u,\"id\":%lu,\"mask_next\":%u,\"mask_prev\":%u,\"mask_mode\":%u,\"debounce_ms\":%u}",
+             (unsigned)bitrate, (unsigned long)id, mn, mp, mm, (unsigned)debounce);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t seek_settings_handler(httpd_req_t *req)
 {
     char buf[128];
@@ -2020,6 +2094,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t can_settings = {
+        .uri = "/can_settings",
+        .method = HTTP_GET,
+        .handler = can_settings_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t seek_settings = {
         .uri = "/seek_settings",
         .method = HTTP_GET,
@@ -2136,6 +2217,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &player_status);
     httpd_register_uri_handler(s_server, &volume);
     httpd_register_uri_handler(s_server, &seek_settings);
+    httpd_register_uri_handler(s_server, &can_settings);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);
