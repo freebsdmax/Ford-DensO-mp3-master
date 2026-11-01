@@ -56,6 +56,21 @@ static char *dup_display(const char *text)
     return p;
 }
 
+/* Підтримувані формати (декодер вибирається за розширенням у конвеєрі). */
+static const char *s_audio_ext[] = {
+    ".mp3", ".flac", ".wav", ".aac", ".m4a", ".ogg", ".opus", ".amr", NULL
+};
+
+static bool is_audio_file(const char *name)
+{
+    const char *ext = strrchr(name, '.');
+    if (!ext) return false;
+    for (int i = 0; s_audio_ext[i]; i++) {
+        if (strcasecmp(ext, s_audio_ext[i]) == 0) return true;
+    }
+    return false;
+}
+
 void add_to_playlist(const char *file_path) {
     if (g_playlist_size >= MAX_PLAYLIST_SIZE) {
         ESP_LOGW(TAG, "Playlist full, skipping: %s", file_path);
@@ -138,9 +153,7 @@ void find_mp3_files_recursive(const char *path)
             if (S_ISDIR(st.st_mode)) {
                 find_mp3_files_recursive(full_path);
             } else if (S_ISREG(st.st_mode)) {
-                const char *ext = strrchr(d->d_name, '.');
-                if (ext && (strcasecmp(ext, ".mp3") == 0)) {
-                    //ESP_LOGI(TAG, "🔍 Знайдено MP3 файл: %s", full_path);
+                if (is_audio_file(d->d_name)) {
                     add_to_playlist(full_path);
                 }
             }

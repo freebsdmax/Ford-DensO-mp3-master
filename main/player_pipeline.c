@@ -10,6 +10,13 @@
 #include "audio_event_iface.h"
 #include "audio_common.h"
 #include "mp3_decoder.h"
+#include "wav_decoder.h"
+#include "flac_decoder.h"
+#include "aac_decoder.h"
+#include "ogg_decoder.h"
+#include "opus_decoder.h"
+#include "amr_decoder.h"
+#include <strings.h>
 #include "fatfs_stream.h"
 #include "audio_pipeline.h"
 #include "esp_timer.h"
@@ -308,7 +315,15 @@ int get_current_position(audio_element_handle_t fatfs_stream_reader) {
             // Предположим стандартный битрейт 128 kbps = 16 KB/s
             // Но лучше пересчитывать через пропорцию
             
-            int position_ms = (int)((info.byte_pos * 1000) / 16000);
+            /* Пропорція від реальної тривалості (працює для MP3/FLAC/WAV/AAC/OGG…),
+               інакше — оцінка за 128 кбіт/с. */
+            int position_ms;
+            if (g_current_track_duration_ms > 0) {
+                position_ms = (int)(((int64_t)info.byte_pos * g_current_track_duration_ms) /
+                                    (int64_t)info.total_bytes);
+            } else {
+                position_ms = (int)((info.byte_pos * 1000) / 16000);
+            }
             
             // 📝 Для отладки
             ESP_LOGD(TAG_PIPE, "⏱️ get_current_position: %d/%d байт -> ~%d мс", 
@@ -441,6 +456,42 @@ void wakeup_from_sleep(void)
 
     // Устанавливаем пин-индикатор сна в HIGH при пробуждении
     gpio_set_level((gpio_num_t)SLEEP_IND_PIN, 1);
+}
+
+
+/* Вибір декодера за розширенням файлу. */
+static audio_element_handle_t create_decoder_for(const char *path)
+{
+    const char *ext = path ? strrchr(path, '.') : NULL;
+    if (!ext) ext = "";
+
+    if (strcasecmp(ext, ".wav") == 0) {
+        wav_decoder_cfg_t c = DEFAULT_WAV_DECODER_CONFIG();
+        return wav_decoder_init(&c);
+    }
+    if (strcasecmp(ext, ".flac") == 0) {
+        flac_decoder_cfg_t c = DEFAULT_FLAC_DECODER_CONFIG();
+        return flac_decoder_init(&c);
+    }
+    if (strcasecmp(ext, ".aac") == 0 || strcasecmp(ext, ".m4a") == 0) {
+        aac_decoder_cfg_t c = DEFAULT_AAC_DECODER_CONFIG();
+        return aac_decoder_init(&c);
+    }
+    if (strcasecmp(ext, ".ogg") == 0) {
+        ogg_decoder_cfg_t c = DEFAULT_OGG_DECODER_CONFIG();
+        return ogg_decoder_init(&c);
+    }
+    if (strcasecmp(ext, ".opus") == 0) {
+        opus_decoder_cfg_t c = DEFAULT_OPUS_DECODER_CONFIG();
+        return decoder_opus_init(&c);
+    }
+    if (strcasecmp(ext, ".amr") == 0) {
+        amr_decoder_cfg_t c = DEFAULT_AMR_DECODER_CONFIG();
+        return amr_decoder_init(&c);
+    }
+
+    mp3_decoder_cfg_t cfg = DEFAULT_MP3_DECODER_CONFIG();
+    return mp3_decoder_init(&cfg);
 }
 
 esp_err_t start_external_input(void)
@@ -1266,8 +1317,11 @@ void player_task(void *pvParam)
         
         // 🔍 Проаналізуємо MP3 файл перед відтворенням
         // Використовуємо шлях безпосередньо з плейлиста (він вже містить повний шлях)
-        ESP_LOGI(TAG_PIPE, "🔍 Аналіз файлу: %s", g_playlist[g_current_track]);
-        analyze_mp3_file(g_playlist[g_current_track]);
+        const char *cur_ext = strrchr(g_playlist[g_current_track], '.');
+        if (cur_ext && strcasecmp(cur_ext, ".mp3") == 0) {
+            ESP_LOGI(TAG_PIPE, "🔍 Аналіз файлу: %s", g_playlist[g_current_track]);
+            analyze_mp3_file(g_playlist[g_current_track]);
+        }
         
         if (!g_usb_mounted) {
             ESP_LOGE(TAG_PIPE, "❌ USB демонтовано під час відтворення");
@@ -1306,8 +1360,7 @@ void player_task(void *pvParam)
         i2s_stream_writer = i2s_stream_init(&i2s_cfg);
         
         // 🎵 Створити декодер для MP3
-        mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
-        decoder = mp3_decoder_init(&mp3_cfg);
+        decoder = create_decoder_for(g_playlist[g_current_track]);
 
         /* Software volume: PCM5102 has no hardware volume control. */
         volume_stream = volume_stream_init();
