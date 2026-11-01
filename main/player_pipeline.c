@@ -156,6 +156,7 @@ void stop_playback(void) {
 #include "uart_ota_protocol.h"
 #include "player_link.h"
 #include "player_volume.h"
+#include "player_audio_cfg.h"
 #include "player_media.h"
 
 /**
@@ -1051,8 +1052,11 @@ void i2s_passthrough_task(void *pvParameters)
     
     // 1. Низькорівневий I2S slave для читання (отримує clock ззовні)
     i2s_chan_config_t rx_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_SLAVE);
-    rx_cfg.dma_desc_num = 6;        // збільшуємо кількість DMA дескрипторів
-    rx_cfg.dma_frame_num = 512;     // збільшуємо розмір кадру
+    /* Розмір RX-буфера задається профілем (низька затримка / збалансований / стійкий). */
+    uint32_t rx_desc = 6, rx_frame = 512;
+    player_audio_cfg_rx(&rx_desc, &rx_frame);
+    rx_cfg.dma_desc_num = rx_desc;
+    rx_cfg.dma_frame_num = rx_frame;
     
     i2s_chan_handle_t rx_handle = NULL;
     esp_err_t ret = i2s_new_channel(&rx_cfg, NULL, &rx_handle);

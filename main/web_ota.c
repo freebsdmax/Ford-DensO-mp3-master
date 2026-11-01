@@ -12,6 +12,7 @@
 #include "player_auth.h"
 #include "player_ble.h"
 #include "player_logfile.h"
+#include "player_audio_cfg.h"
 #include "player_media.h"
 #include "player_can.h"
 #include "esp_heap_caps.h"
@@ -574,6 +575,18 @@ static const char *INDEX_HTML =
 "    </form>"
 "  </div>"
 "  <div class='section'>"
+"    <h3>🎚️ Аудіо-буфери (Bluetooth)</h3>"
+"    <label>Профіль:</label><br>"
+"    <select id='audio-profile'>"
+"      <option value='0'>Низька затримка (~23 мс)</option>"
+"      <option value='1'>Збалансований (~70 мс)</option>"
+"      <option value='2'>Стійкий (~186 мс)</option>"
+"    </select><br>"
+"    <small>Застосовується після зміни режиму або перезавантаження.</small><br><br>"
+"    <button class='btn' type='button' onclick='saveAudioProfile()'>Зберегти</button>"
+"    <div id='audio-status' style='margin-top:1rem;color:#06c;'></div>"
+"  </div>"
+"  <div class='section'>"
 "    <h3>📝 Логи</h3>"
 "    <label>Розмір буфера (застосується після перезавантаження):</label><br>"
 "    <select id='log-buf'>"
@@ -828,6 +841,17 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function loadAudioProfile(){"
+"  fetch('/audio_profile').then(r=>r.json()).then(s=>{"
+"    document.getElementById('audio-profile').value = s.profile;"
+"  }).catch(e=>console.log('Audio profile load error:',e));"
+"}"
+"function saveAudioProfile(){"
+"  const p = document.getElementById('audio-profile').value;"
+"  fetch('/audio_profile?profile=' + p).then(r=>r.json()).then(s=>{"
+"    document.getElementById('audio-status').textContent = 'Збережено: профіль ' + s.profile + ' (' + s.rx_desc + ' x ' + s.rx_frame + ')';"
+"  }).catch(e=>{document.getElementById('audio-status').textContent = 'Помилка';});"
+"}"
 "function loadLogsConfig(){"
 "  fetch('/logs_config').then(r=>r.json()).then(s=>{"
 "    document.getElementById('log-buf').value = s.buf_kb;"
@@ -1028,7 +1052,7 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName(); loadLogsConfig();}catch(e){} };"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName(); loadLogsConfig(); loadAudioProfile();}catch(e){} };"
 "</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
@@ -1256,6 +1280,27 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t audio_profile_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+
+    char buf[64];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[8];
+        if (httpd_query_key_value(buf, "profile", val, sizeof(val)) == ESP_OK) {
+            player_audio_cfg_set_profile((uint8_t)atoi(val));
+        }
+    }
+
+    uint32_t desc = 0, frame = 0;
+    player_audio_cfg_rx(&desc, &frame);
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"profile\":%u,\"rx_desc\":%lu,\"rx_frame\":%lu}",
+             (unsigned)player_audio_cfg_profile(), (unsigned long)desc, (unsigned long)frame);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t logs_config_handler(httpd_req_t *req)
 {
     REQUIRE_AUTH(req);
@@ -2333,6 +2378,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t audio_profile = {
+        .uri = "/audio_profile",
+        .method = HTTP_GET,
+        .handler = audio_profile_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t logs_config = {
         .uri = "/logs_config",
         .method = HTTP_GET,
@@ -2473,6 +2525,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &can_settings);
     httpd_register_uri_handler(s_server, &ble_settings);
     httpd_register_uri_handler(s_server, &logs_config);
+    httpd_register_uri_handler(s_server, &audio_profile);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);
