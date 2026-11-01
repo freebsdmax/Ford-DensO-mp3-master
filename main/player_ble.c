@@ -11,6 +11,7 @@
 #include "player_file_ota.h"
 #include "player_ble_ota.h"
 #include "player_can.h"
+#include "player_auth.h"
 #include "app_messages.h"
 #include "cJSON.h"
 #include "mbedtls/base64.h"
@@ -757,6 +758,28 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "success", true);
         cJSON_AddNumberToObject(root, "volume", player_volume_get());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "auth.get") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "enabled", player_auth_required());
+        cJSON_AddStringToObject(root, "token", player_auth_token());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "auth.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *t = j ? cJSON_GetObjectItemCaseSensitive(j, "token") : NULL;
+        esp_err_t err = cJSON_IsString(t) ? player_auth_set(t->valuestring)
+                                          : player_auth_set("");
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddBoolToObject(root, "enabled", player_auth_required());
+        cJSON_AddStringToObject(root, "token", player_auth_token());
         return ble_rpc_return_json(root, response, response_size);
     }
 

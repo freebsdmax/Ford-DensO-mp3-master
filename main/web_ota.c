@@ -9,6 +9,7 @@
 #include "player_logs.h"
 #include "player_storage.h"
 #include "player_volume.h"
+#include "player_auth.h"
 #include "player_media.h"
 #include "player_can.h"
 #include "esp_heap_caps.h"
@@ -616,6 +617,25 @@ static const char *INDEX_HTML =
 "  volumeEl.oninput = function(){ document.getElementById('volume-label').textContent = this.value + '%'; };"
 "  volumeEl.onchange = function(){ fetch('/volume?value=' + this.value).catch(e=>console.log('Volume error:',e)); };"
 "}"
+"/* Токен доступу: додаємо до кожного запиту, при 401 - питаємо. */"
+"(function(){"
+"  const origFetch = window.fetch;"
+"  window.fetch = function(url, opts){"
+"    try {"
+"      const t = localStorage.getItem('fp_token');"
+"      if (t && typeof url === 'string') {"
+"        url = url + (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(t);"
+"      }"
+"    } catch(e) {}"
+"    return origFetch(url, opts).then(r => {"
+"      if (r.status === 401) {"
+"        const t = prompt('Введіть токен доступу (задається в застосунку):');"
+"        if (t) { try { localStorage.setItem('fp_token', t); } catch(e){} location.reload(); }"
+"      }"
+"      return r;"
+"    });"
+"  };"
+"})();"
 "function updatePlayerStatus(){"
 "  fetch('/player_status').then(r=>r.json()).then(s=>{"
 "    lastStatus = s;"
@@ -879,6 +899,18 @@ static const char *INDEX_HTML =
 
 "</body></html>";
 
+
+/* Захищені обробники: без правильного токена -> 401 (якщо токен заданий). */
+static esp_err_t auth_deny(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"error\":\"unauthorized\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_FAIL;
+}
+
+#define REQUIRE_AUTH(req) do { if (!player_auth_request_ok(req)) return auth_deny(req); } while (0)
+
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -1055,6 +1087,8 @@ static esp_err_t playlist_get_handler(httpd_req_t *req)
 // Handle player commands
 static esp_err_t player_cmd_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[100];
     int ret = httpd_req_get_url_query_str(req, buf, sizeof(buf));
     if (ret != ESP_OK) {
@@ -1088,6 +1122,8 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 // Get player status as JSON
 static esp_err_t can_settings_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[192];
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
         char val[16];
@@ -1121,6 +1157,8 @@ static esp_err_t can_settings_handler(httpd_req_t *req)
 
 static esp_err_t seek_settings_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[128];
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
         char step[8] = {0};
@@ -1142,6 +1180,8 @@ static esp_err_t seek_settings_handler(httpd_req_t *req)
 
 static esp_err_t volume_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[64];
     if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
         char val[8] = {0};
@@ -1197,6 +1237,8 @@ static esp_err_t wifi_settings_get_handler(httpd_req_t *req)
 // Set Wi-Fi settings from POST data
 static esp_err_t wifi_settings_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[512];  // Збільшено буфер
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
@@ -1343,6 +1385,8 @@ static esp_err_t sleep_settings_get_handler(httpd_req_t *req)
 // 🌙 POST handler для налаштувань сну
 static esp_err_t sleep_settings_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[256];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {
@@ -1399,6 +1443,8 @@ static esp_err_t sleep_settings_post_handler(httpd_req_t *req)
 
 static esp_err_t upload_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     const esp_partition_t *update_partition = esp_ota_get_next_update_partition(NULL);
     if (!update_partition) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Немає OTA-розділу");
@@ -1603,6 +1649,8 @@ static void master_ota_task(void *param)
  */
 static esp_err_t upload_slave_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     if (req->content_len <= 0 || req->content_len > UART_OTA_MAX_SIZE) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний розмір прошивки (макс. 2 МБ)");
         return ESP_FAIL;
@@ -1668,6 +1716,8 @@ static esp_err_t upload_slave_handler(httpd_req_t *req)
  */
 static esp_err_t upload_to_storage_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     /* Keep the image in the internal FAT partition (/storage) so it can be
        flashed later and is deleted only after a successful update. */
     if (req->content_len <= 0 || req->content_len > (2 * 1024 * 1024)) {
@@ -1747,6 +1797,8 @@ static esp_err_t log_level_get_handler(httpd_req_t *req)
 
 static esp_err_t log_level_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[10];
     int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
     if (ret <= 0) return ESP_FAIL;
@@ -1776,6 +1828,8 @@ static esp_err_t verbose_logs_get_handler(httpd_req_t *req)
 
 static esp_err_t verbose_logs_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[10];
     int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
     if (ret <= 0) return ESP_FAIL;
@@ -1795,6 +1849,8 @@ static esp_err_t verbose_logs_post_handler(httpd_req_t *req)
 
 static esp_err_t restart_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     httpd_resp_sendstr(req, "Пристрій перезавантажується…");
     vTaskDelay(pdMS_TO_TICKS(100)); // Give time to send response
     esp_restart();
@@ -1842,6 +1898,8 @@ static esp_err_t component_logs_get_handler(httpd_req_t *req)
 
 static esp_err_t component_logs_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf)-1);
     if (ret <= 0) {
@@ -1970,6 +2028,8 @@ static esp_err_t elm327_config_get_handler(httpd_req_t *req)
 
 static esp_err_t elm327_config_post_handler(httpd_req_t *req)
 {
+    REQUIRE_AUTH(req);
+
     char buf[256];
     int ret, remaining = req->content_len;
     if (remaining > 255) remaining = 255;

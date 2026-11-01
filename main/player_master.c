@@ -94,7 +94,8 @@
 #include "player_slave.h"
 #include "player_media.h"
 #include "player_storage.h"
-#include "player_volume.h"     // Версія основного додатку
+#include "player_volume.h"
+#include "player_auth.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #include "elm327_emu.h"         // ELM327 емулятор для діагностики
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -947,6 +948,7 @@ if (g_board_handle) {
         // Ініціалізація UART master для відправки команд на зовнішній пристрій
         esp_err_t i2c_err = init_i2c_master();
     slave_version_start();
+    player_auth_load();
     player_volume_load();
     player_seek_load();
     player_media_start();
