@@ -95,7 +95,8 @@
 #include "player_media.h"
 #include "player_storage.h"
 #include "player_volume.h"
-#include "player_auth.h"     // Версія основного додатку
+#include "player_auth.h"
+#include "player_logfile.h"     // Версія основного додатку
 #include "ble_player_service.h" // BLE GATT сервер для мобільного додатку
 #include "elm327_emu.h"         // ELM327 емулятор для діагностики
 #pragma GCC diagnostic ignored "-Wformat-truncation"
@@ -952,6 +953,7 @@ if (g_board_handle) {
     player_volume_load();
     player_seek_load();
     player_media_start();
+    player_logfile_start();
     /* Slave does not keep this in NVS - push it after the UART is ready. */
     player_seek_sync_slave();
     player_storage_init();

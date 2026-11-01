@@ -13,6 +13,7 @@
 #include "player_can.h"
 #include "player_auth.h"
 #include "ble_player_service.h"
+#include "player_logfile.h"
 #include "nvs.h"
 #include "app_messages.h"
 #include "cJSON.h"
@@ -802,6 +803,35 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "success", true);
         cJSON_AddNumberToObject(root, "volume", player_volume_get());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "logs.cfg") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "buf_kb", (double)(web_ota_log_buffer_size() / 1024));
+        cJSON_AddBoolToObject(root, "persist", player_logfile_enabled());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "logs.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *kb = j ? cJSON_GetObjectItemCaseSensitive(j, "buf_kb") : NULL;
+        const cJSON *ps = j ? cJSON_GetObjectItemCaseSensitive(j, "persist") : NULL;
+        esp_err_t err = ESP_OK;
+        if (cJSON_IsNumber(kb)) {
+            err = web_ota_set_log_buffer_kb((uint16_t)kb->valueint);
+        }
+        if (cJSON_IsBool(ps)) {
+            player_logfile_set_enabled(cJSON_IsTrue(ps));
+        }
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddNumberToObject(root, "buf_kb", (double)(web_ota_log_buffer_size() / 1024));
+        cJSON_AddBoolToObject(root, "persist", player_logfile_enabled());
+        cJSON_AddBoolToObject(root, "reboot_required", err == ESP_OK);
         return ble_rpc_return_json(root, response, response_size);
     }
 

@@ -11,6 +11,7 @@
 #include "player_volume.h"
 #include "player_auth.h"
 #include "player_ble.h"
+#include "player_logfile.h"
 #include "player_media.h"
 #include "player_can.h"
 #include "esp_heap_caps.h"
@@ -21,13 +22,95 @@
 
 #include <stdarg.h> // for va_list
 
-#define LOG_BUFFER_SIZE 4096
+#define LOG_BUFFER_DEFAULT 4096
+#define LOG_BUFFER_MIN 2048
+#define LOG_BUFFER_MAX (16 * 1024)
 
-static char log_buffer[LOG_BUFFER_SIZE];
+static char *log_buffer = NULL;
+static size_t log_buffer_size = LOG_BUFFER_DEFAULT;
 
 static int log_write_pos = 0;
 static size_t log_valid_bytes = 0;
+static volatile uint32_t log_total_seq = 0;   /* скільки байтів записано з моменту старту */
 static portMUX_TYPE log_buffer_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/* Створює буфер потрібного розміру (викликати до esp_log_set_vprintf). */
+void web_ota_logs_init(void)
+{
+    size_t size = LOG_BUFFER_DEFAULT;
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
+        uint16_t kb = 0;
+        if (nvs_get_u16(h, "log_buf_kb", &kb) == ESP_OK) {
+            size_t want = (size_t)kb * 1024;
+            if (want >= LOG_BUFFER_MIN && want <= LOG_BUFFER_MAX) size = want;
+        }
+        nvs_close(h);
+    }
+
+    char *buf = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) buf = heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGE("LogBuffer", "alloc failed, using %d bytes", LOG_BUFFER_DEFAULT);
+        size = LOG_BUFFER_DEFAULT;
+        buf = heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    }
+    if (!buf) return;
+
+    log_buffer = buf;
+    log_buffer_size = size;
+    log_write_pos = 0;
+    log_valid_bytes = 0;
+    log_total_seq = 0;
+    memset(log_buffer, 0, log_buffer_size);
+    ESP_LOGI("LogBuffer", "buffer: %u bytes", (unsigned)log_buffer_size);
+}
+
+size_t web_ota_log_buffer_size(void)
+{
+    return log_buffer_size;
+}
+
+esp_err_t web_ota_set_log_buffer_kb(uint16_t kb)
+{
+    if (kb < 2 || kb > 16) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("audio_player", NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u16(h, "log_buf_kb", kb);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+/** Копіює в dst нові байти логів, які з'явились після *since. */
+size_t web_ota_logs_since(uint32_t *since, char *dst, size_t cap)
+{
+    if (!log_buffer || !since || !dst || cap == 0) return 0;
+
+    portENTER_CRITICAL(&log_buffer_mux);
+    uint32_t total = log_total_seq;
+    uint32_t from = *since;
+    if (total <= from) {
+        portEXIT_CRITICAL(&log_buffer_mux);
+        *since = total;
+        return 0;
+    }
+
+    size_t new_bytes = total - from;
+    if (new_bytes > log_buffer_size) new_bytes = log_buffer_size;   /* старіше вже затерто */
+    if (new_bytes > cap) new_bytes = cap;
+
+    /* кінець = поточна позиція запису; беремо new_bytes перед нею */
+    int start = ((int)log_write_pos - (int)new_bytes + (int)log_buffer_size * 2) % (int)log_buffer_size;
+    for (size_t i = 0; i < new_bytes; i++) {
+        dst[i] = log_buffer[(start + i) % log_buffer_size];
+    }
+    portEXIT_CRITICAL(&log_buffer_mux);
+
+    *since = total - (uint32_t)((total - from) - new_bytes);   /* пропущене зараховуємо */
+    return new_bytes;
+}
 
 static vprintf_like_t original_vprintf = NULL;
 
@@ -51,16 +134,19 @@ int log_vprintf(const char *fmt, va_list args) {
         count = sizeof(temp) - 1;
     }
 
-    portENTER_CRITICAL(&log_buffer_mux);
-    for (size_t i = 0; i < count; i++) {
-        log_buffer[log_write_pos] = temp[i];
-        log_write_pos = (log_write_pos + 1) % LOG_BUFFER_SIZE;
+    if (log_buffer) {
+        portENTER_CRITICAL(&log_buffer_mux);
+        for (size_t i = 0; i < count; i++) {
+            log_buffer[log_write_pos] = temp[i];
+            log_write_pos = (log_write_pos + 1) % (int)log_buffer_size;
+        }
+        log_valid_bytes += count;
+        if (log_valid_bytes > log_buffer_size) {
+            log_valid_bytes = log_buffer_size;
+        }
+        log_total_seq += (uint32_t)count;
+        portEXIT_CRITICAL(&log_buffer_mux);
     }
-    log_valid_bytes += count;
-    if (log_valid_bytes > LOG_BUFFER_SIZE) {
-        log_valid_bytes = LOG_BUFFER_SIZE;
-    }
-    portEXIT_CRITICAL(&log_buffer_mux);
 
     // Call original to keep serial output
     int result;
@@ -79,15 +165,19 @@ size_t web_ota_copy_logs(char *buffer, size_t buffer_size)
     if (buffer == NULL || buffer_size == 0) {
         return 0;
     }
+    if (!log_buffer) {
+        if (buffer_size > 1) { buffer[0] = '\n'; buffer[1] = '\0'; }
+        return 0;
+    }
 
     portENTER_CRITICAL(&log_buffer_mux);
     size_t count = log_valid_bytes;
     if (count >= buffer_size) {
         count = buffer_size - 1;
     }
-    int start = (log_write_pos - (int)count + LOG_BUFFER_SIZE) % LOG_BUFFER_SIZE;
+    int start = ((int)log_write_pos - (int)count + (int)log_buffer_size * 2) % (int)log_buffer_size;
     for (size_t i = 0; i < count; i++) {
-        buffer[i] = log_buffer[(start + i) % LOG_BUFFER_SIZE];
+        buffer[i] = log_buffer[(start + i) % log_buffer_size];
     }
     buffer[count] = '\0';
     portEXIT_CRITICAL(&log_buffer_mux);
@@ -484,6 +574,19 @@ static const char *INDEX_HTML =
 "    </form>"
 "  </div>"
 "  <div class='section'>"
+"    <h3>📝 Логи</h3>"
+"    <label>Розмір буфера (застосується після перезавантаження):</label><br>"
+"    <select id='log-buf'>"
+"      <option value='2'>2 КБ</option>"
+"      <option value='4'>4 КБ</option>"
+"      <option value='8'>8 КБ</option>"
+"      <option value='16'>16 КБ</option>"
+"    </select><br>"
+"    <label><input type='checkbox' id='log-persist'> Зберігати логи у /storage (чорна скринька)</label><br><br>"
+"    <button class='btn' type='button' onclick='saveLogsConfig()'>Зберегти</button>"
+"    <div id='logs-status' style='margin-top:1rem;color:#06c;'></div>"
+"  </div>"
+"  <div class='section'>"
 "    <h3>📶 Ім'я пристрою (BLE)</h3>"
 "    <label>Назва, яку бачить телефон при скануванні:</label><br>"
 "    <input type='text' id='ble-name' maxlength='31' style='width:100%;'><br><br>"
@@ -725,6 +828,19 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function loadLogsConfig(){"
+"  fetch('/logs_config').then(r=>r.json()).then(s=>{"
+"    document.getElementById('log-buf').value = s.buf_kb;"
+"    document.getElementById('log-persist').checked = !!s.persist;"
+"  }).catch(e=>console.log('Logs config load error:',e));"
+"}"
+"function saveLogsConfig(){"
+"  const b = document.getElementById('log-buf').value;"
+"  const p = document.getElementById('log-persist').checked ? 1 : 0;"
+"  fetch('/logs_config?buf_kb=' + b + '&persist=' + p).then(r=>r.json()).then(s=>{"
+"    document.getElementById('logs-status').textContent = 'Збережено: ' + s.buf_kb + ' КБ, збереження ' + (s.persist ? 'увімк' : 'вимк');"
+"  }).catch(e=>{document.getElementById('logs-status').textContent = 'Помилка';});"
+"}"
 "function loadBleName(){"
 "  fetch('/ble_settings').then(r=>r.json()).then(s=>{"
 "    document.getElementById('ble-name').value = s.name;"
@@ -912,7 +1028,7 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName();}catch(e){} };"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName(); loadLogsConfig();}catch(e){} };"
 "</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
@@ -1140,6 +1256,29 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t logs_config_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+
+    char buf[128];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(buf, "buf_kb", val, sizeof(val)) == ESP_OK) {
+            web_ota_set_log_buffer_kb((uint16_t)atoi(val));
+        }
+        if (httpd_query_key_value(buf, "persist", val, sizeof(val)) == ESP_OK) {
+            player_logfile_set_enabled(atoi(val) != 0);
+        }
+    }
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"buf_kb\":%u,\"persist\":%s,\"reboot_required\":true}",
+             (unsigned)(web_ota_log_buffer_size() / 1024),
+             player_logfile_enabled() ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t ble_settings_handler(httpd_req_t *req)
 {
     REQUIRE_AUTH(req);
@@ -1806,17 +1945,18 @@ static esp_err_t logs_get_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     // Send the log buffer
-    char *response = malloc(LOG_BUFFER_SIZE + 1);
+    char *response = malloc(web_ota_log_buffer_size() + 1);
     if (!response) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Помилка пам'яті");
         return ESP_FAIL;
     }
+    size_t sz = web_ota_log_buffer_size();
     int pos = log_write_pos;
-    for(int i = 0; i < LOG_BUFFER_SIZE; i++) {
+    for (size_t i = 0; i < sz; i++) {
         response[i] = log_buffer[pos];
-        pos = (pos + 1) % LOG_BUFFER_SIZE;
+        pos = (pos + 1) % (int)sz;
     }
-    response[LOG_BUFFER_SIZE] = '\0';
+    response[sz] = '\0';
     httpd_resp_send(req, response, strlen(response));
     free(response);
     return ESP_OK;
@@ -2134,6 +2274,7 @@ esp_err_t web_ota_start(void)
     esp_log_level_set("*", level);
 
     // Set up log capture
+    web_ota_logs_init();
     original_vprintf = esp_log_set_vprintf(log_vprintf);
     ESP_LOGI(TAG, "Log capture enabled");
 
@@ -2190,6 +2331,13 @@ esp_err_t web_ota_start(void)
         .method = HTTP_GET,
         .handler = player_cmd_handler,
         .user_ctx = NULL,
+    };
+
+    httpd_uri_t logs_config = {
+        .uri = "/logs_config",
+        .method = HTTP_GET,
+        .handler = logs_config_handler,
+        .user_ctx = NULL
     };
 
     httpd_uri_t ble_settings = {
@@ -2324,6 +2472,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &seek_settings);
     httpd_register_uri_handler(s_server, &can_settings);
     httpd_register_uri_handler(s_server, &ble_settings);
+    httpd_register_uri_handler(s_server, &logs_config);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);
