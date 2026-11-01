@@ -40,6 +40,7 @@
 #define UART_CMD_MEDIA_STATE       0x0A  /* slave -> master media state */
 #define UART_CMD_SEEK              0x0B  /* master -> slave: [delta_ms:int32 LE] */
 #define UART_CMD_GET_MEDIA         0x0C  /* master -> slave: request media state */
+#define UART_CMD_SET_SEEK          0x0D  /* master -> slave: [0xAA][0x0D][step_s:1][mode:1]  mode: 0=presses 1=hold */
 #define UART_CMD_GET_FW_VER        0x09  /* firmware version: resp [0xAA][0x09][len][chars] */  /* AVRCP pause (external/BT mode) */  // Отримати версію збірки
 
 // ============ НАЛАШТУВАННЯ ============

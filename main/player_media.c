@@ -8,6 +8,8 @@
 #include "freertos/semphr.h"
 
 #include "player_link.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 #include "uart_ota_protocol.h"
 
 static const char *TAG = "MEDIA";
@@ -193,4 +195,81 @@ bool player_media_seek_to(uint32_t target_ms)
     }
     int32_t delta = (int32_t)target_ms - (int32_t)cur.pos_ms;
     return player_media_seek_by(delta);
+}
+
+/* ---------------- seek configuration ---------------- */
+
+static volatile uint8_t s_seek_step_s = 10;
+static volatile uint8_t s_seek_mode = 0;
+
+static void seek_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "seek_step", s_seek_step_s);
+        nvs_set_u8(h, "seek_mode", s_seek_mode);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
+void player_seek_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
+        uint8_t v = 0;
+        if (nvs_get_u8(h, "seek_step", &v) == ESP_OK && v >= 5 && v <= 30) {
+            s_seek_step_s = v;
+        }
+        if (nvs_get_u8(h, "seek_mode", &v) == ESP_OK) {
+            s_seek_mode = (v == 1) ? 1 : 0;
+        }
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "Seek config: %u s, mode=%s",
+             (unsigned)s_seek_step_s, s_seek_mode ? "hold" : "presses");
+}
+
+uint8_t player_seek_step_s(void)
+{
+    return s_seek_step_s;
+}
+
+uint8_t player_seek_mode(void)
+{
+    return s_seek_mode;
+}
+
+bool player_seek_set(uint8_t step_s, uint8_t mode)
+{
+    if (step_s < 5) step_s = 5;
+    if (step_s > 30) step_s = 30;
+    s_seek_step_s = step_s;
+    s_seek_mode = (mode == 1) ? 1 : 0;
+    seek_save();
+    ESP_LOGI(TAG, "Seek config set: %u s, mode=%s",
+             (unsigned)s_seek_step_s, s_seek_mode ? "hold" : "presses");
+    return player_seek_sync_slave();
+}
+
+bool player_seek_sync_slave(void)
+{
+    if (uart_link_ota_active()) return false;
+    if (!uart_link_lock(500)) return false;
+
+    uint8_t pkt[4] = {
+        UART_CMD_PREFIX_NORMAL,
+        UART_CMD_SET_SEEK,
+        s_seek_step_s,
+        s_seek_mode
+    };
+    int w = uart_write_bytes(MASTER_UART_PORT, (const char *)pkt, sizeof(pkt));
+    uart_link_unlock();
+
+    if (w != (int)sizeof(pkt)) {
+        ESP_LOGW(TAG, "seek config not sent (%d bytes)", w);
+        return false;
+    }
+    ESP_LOGI(TAG, "seek config sent to slave: %u s, mode=%u", s_seek_step_s, s_seek_mode);
+    return true;
 }

@@ -27,3 +27,11 @@ bool player_media_seek_to(uint32_t target_ms);
 
 /** Forward a relative seek (positive/negative milliseconds). */
 bool player_media_seek_by(int32_t delta_ms);
+
+/** Налаштування перемотки (зберігаються в NVS, дублюються на Slave). */
+uint8_t player_seek_step_s(void);      /* 5..30 */
+uint8_t player_seek_mode(void);        /* 0 = натискання, 1 = утримання */
+bool player_seek_set(uint8_t step_s, uint8_t mode);
+void player_seek_load(void);
+/** Надіслати поточні налаштування Slave (після старту / зміни). */
+bool player_seek_sync_slave(void);

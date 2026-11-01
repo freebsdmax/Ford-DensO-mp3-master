@@ -760,6 +760,29 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         return ble_rpc_return_json(root, response, response_size);
     }
 
+    if (strcmp(request_copy, "seek.get") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "step_s", player_seek_step_s());
+        cJSON_AddNumberToObject(root, "mode", player_seek_mode());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "seek.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *st = j ? cJSON_GetObjectItemCaseSensitive(j, "step_s") : NULL;
+        const cJSON *md = j ? cJSON_GetObjectItemCaseSensitive(j, "mode") : NULL;
+        bool ok = player_seek_set(cJSON_IsNumber(st) ? (uint8_t)st->valueint : player_seek_step_s(),
+                                  cJSON_IsNumber(md) ? (uint8_t)md->valueint : player_seek_mode());
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", ok);
+        cJSON_AddNumberToObject(root, "step_s", player_seek_step_s());
+        cJSON_AddNumberToObject(root, "mode", player_seek_mode());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
     if (strcmp(request_copy, "media.get") == 0) {
         player_media_t media;
         player_media_get(&media);

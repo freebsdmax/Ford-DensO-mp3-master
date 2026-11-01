@@ -9,6 +9,7 @@
 #include "player_logs.h"
 #include "player_storage.h"
 #include "player_volume.h"
+#include "player_media.h"
 #include "esp_heap_caps.h"
 #include "uart_ota_protocol.h"
 #include "nvs.h"
@@ -480,6 +481,23 @@ static const char *INDEX_HTML =
 "    </form>"
 "  </div>"
 "  <div class='section'>"
+"    <h3>⏩ Перемотка (Bluetooth)</h3>"
+"    <label>Крок одного натискання:</label><br>"
+"    <select id='seek-step'>"
+"      <option value='5'>5 с</option>"
+"      <option value='10'>10 с</option>"
+"      <option value='15'>15 с</option>"
+"      <option value='30'>30 с</option>"
+"    </select><br>"
+"    <label>Метод:</label><br>"
+"    <select id='seek-mode'>"
+"      <option value='0'>Кілька натискань</option>"
+"      <option value='1'>Довге утримання</option>"
+"    </select><br><br>"
+"    <button class='btn' type='button' onclick='saveSeekSettings()'>Зберегти</button>"
+"    <div id='seek-status' style='margin-top:1rem;color:#06c;'></div>"
+"  </div>"
+"  <div class='section'>"
 "    <h3>🌙 Налаштування сну</h3>"
 "    <form id='sleep-form'>"
 "      <label>Режим сну:</label><br>"
@@ -659,6 +677,20 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function loadSeekSettings(){"
+"  fetch('/seek_settings').then(r=>r.json()).then(s=>{"
+"    document.getElementById('seek-step').value = s.step_s;"
+"    document.getElementById('seek-mode').value = s.mode;"
+"  }).catch(e=>console.log('Seek load error:',e));"
+"}"
+"function saveSeekSettings(){"
+"  const step = document.getElementById('seek-step').value;"
+"  const mode = document.getElementById('seek-mode').value;"
+"  fetch('/seek_settings?step_s=' + step + '&mode=' + mode).then(r=>r.json()).then(s=>{"
+"    document.getElementById('seek-status').textContent = 'Збережено: ' + s.step_s + ' с, ' + (s.mode == 1 ? 'утримання' : 'натискання');"
+"  }).catch(e=>{document.getElementById('seek-status').textContent = 'Помилка';});"
+"}"
+"window.addEventListener('load', () => { try { loadSeekSettings(); } catch(e){} });"
 "function loadWifiSettings(){"
 "  fetch('/wifi_settings').then(r=>{"
 "    if (!r.ok) {"
@@ -799,7 +831,7 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} };"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings();}catch(e){} };"
 "</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
@@ -1013,6 +1045,27 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t seek_settings_handler(httpd_req_t *req)
+{
+    char buf[128];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char step[8] = {0};
+        char mode[8] = {0};
+        if (httpd_query_key_value(buf, "step_s", step, sizeof(step)) == ESP_OK ||
+            httpd_query_key_value(buf, "mode", mode, sizeof(mode)) == ESP_OK) {
+            uint8_t st = step[0] ? (uint8_t)atoi(step) : player_seek_step_s();
+            uint8_t md = mode[0] ? (uint8_t)atoi(mode) : player_seek_mode();
+            player_seek_set(st, md);
+        }
+    }
+
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"step_s\":%u,\"mode\":%u}",
+             (unsigned)player_seek_step_s(), (unsigned)player_seek_mode());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t volume_handler(httpd_req_t *req)
 {
     char buf[64];
@@ -1967,6 +2020,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t seek_settings = {
+        .uri = "/seek_settings",
+        .method = HTTP_GET,
+        .handler = seek_settings_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t volume = {
         .uri = "/volume",
         .method = HTTP_GET,
@@ -2075,6 +2135,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &player_cmd);
     httpd_register_uri_handler(s_server, &player_status);
     httpd_register_uri_handler(s_server, &volume);
+    httpd_register_uri_handler(s_server, &seek_settings);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);

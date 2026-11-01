@@ -947,7 +947,10 @@ if (g_board_handle) {
         esp_err_t i2c_err = init_i2c_master();
     slave_version_start();
     player_volume_load();
+    player_seek_load();
     player_media_start();
+    /* Slave does not keep this in NVS - push it after the UART is ready. */
+    player_seek_sync_slave();
     player_storage_init();
         if (i2c_err != ESP_OK) {
             ESP_LOGW(TAG, "⚠️ UART master ініціалізовано неуспішно: %s", esp_err_to_name(i2c_err));
