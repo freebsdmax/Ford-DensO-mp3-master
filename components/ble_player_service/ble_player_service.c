@@ -193,6 +193,14 @@ static void ble_rpc_worker(void *arg)
     }
 }
 
+static char s_device_name[32] = "ESP32_MP3_Player";
+
+void ble_player_service_set_name(const char *name)
+{
+    if (!name || !name[0]) return;
+    strlcpy(s_device_name, name, sizeof(s_device_name));
+}
+
 static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
 {
     switch (event) {
@@ -203,7 +211,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
             player_profile_tab[PLAYER_PROFILE_APP_ID].service_id.id.uuid.len = ESP_UUID_LEN_128;
             memcpy(player_profile_tab[PLAYER_PROFILE_APP_ID].service_id.id.uuid.uuid.uuid128, PLAYER_SERVICE_UUID128, ESP_UUID_LEN_128);
 
-            esp_ble_gap_set_device_name("ESP32_MP3_Player");
+            esp_ble_gap_set_device_name(s_device_name);
             
             esp_ble_gatts_create_service(gatts_if, &player_profile_tab[PLAYER_PROFILE_APP_ID].service_id, 12);
             break;

@@ -12,3 +12,9 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
 bool ble_file_ota_frame(uint32_t offset, const uint8_t *data, size_t len);
 void ble_command_handler(const char *command, const char *params);
 const char *ble_rpc_string(cJSON *root, const char *name, const char *fallback);
+
+/** Читає збережене ім'я BLE (викликати до ble_player_service_init). */
+void player_ble_load_settings(void);
+
+const char *player_ble_name(void);
+esp_err_t player_ble_set_name(const char *name);

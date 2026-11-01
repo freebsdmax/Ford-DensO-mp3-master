@@ -12,6 +12,8 @@
 #include "player_ble_ota.h"
 #include "player_can.h"
 #include "player_auth.h"
+#include "ble_player_service.h"
+#include "nvs.h"
 #include "app_messages.h"
 #include "cJSON.h"
 #include "mbedtls/base64.h"
@@ -182,6 +184,48 @@ bool ble_file_ota_frame(uint32_t offset, const uint8_t *data, size_t len)
 {
     /* Binary OTA frame from the GATT write callback: no RPC round trip. */
     return file_ota_write_at((size_t)offset, data, len) == ESP_OK;
+}
+
+static char s_ble_name[32] = "ESP32_MP3_Player";
+
+void player_ble_load_settings(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
+        size_t len = sizeof(s_ble_name);
+        if (nvs_get_str(h, "ble_name", s_ble_name, &len) != ESP_OK) {
+            strlcpy(s_ble_name, "ESP32_MP3_Player", sizeof(s_ble_name));
+        }
+        nvs_close(h);
+    }
+    ble_player_service_set_name(s_ble_name);
+    ESP_LOGI("Player", "BLE name: %s", s_ble_name);
+}
+
+static esp_err_t player_ble_save_name(const char *name);
+
+const char *player_ble_name(void)
+{
+    return s_ble_name;
+}
+
+esp_err_t player_ble_set_name(const char *name)
+{
+    return player_ble_save_name(name);
+}
+
+static esp_err_t player_ble_save_name(const char *name)
+{
+    if (!name || !name[0]) return ESP_ERR_INVALID_ARG;
+    strlcpy(s_ble_name, name, sizeof(s_ble_name));
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open("audio_player", NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_str(h, "ble_name", s_ble_name);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
 }
 
 size_t ble_rpc_handler(const char *request, char *response, size_t response_size)
@@ -758,6 +802,29 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "success", true);
         cJSON_AddNumberToObject(root, "volume", player_volume_get());
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "ble.get") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddStringToObject(root, "name", s_ble_name);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "ble.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *n = j ? cJSON_GetObjectItemCaseSensitive(j, "name") : NULL;
+        esp_err_t err = ESP_ERR_INVALID_ARG;
+        if (cJSON_IsString(n) && n->valuestring[0]) {
+            err = player_ble_save_name(n->valuestring);
+        }
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddBoolToObject(root, "reboot_required", err == ESP_OK);
+        cJSON_AddStringToObject(root, "name", s_ble_name);
         return ble_rpc_return_json(root, response, response_size);
     }
 

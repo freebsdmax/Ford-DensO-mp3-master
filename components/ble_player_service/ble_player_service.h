@@ -46,6 +46,9 @@ typedef bool (*ble_ota_frame_callback_t)(uint32_t offset, const uint8_t *data, s
  */
 esp_err_t ble_player_service_init(void);
 
+/** Ім'я, яке плата показує по BLE (застосовується при старті). */
+void ble_player_service_set_name(const char *name);
+
 /**
  * @brief Встановити callback для обробки команд
  */

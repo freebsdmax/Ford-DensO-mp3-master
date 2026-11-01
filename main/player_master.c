@@ -1075,6 +1075,7 @@ if (g_board_handle) {
     
     // � BLE Player Service ініціалізація
     ESP_LOGI(TAG, "📱 Ініціалізація BLE Player Service...");
+    player_ble_load_settings();
     esp_err_t ble_err = ble_player_service_init();
     if (ble_err == ESP_OK) {
         ble_player_set_command_handler(ble_command_handler);

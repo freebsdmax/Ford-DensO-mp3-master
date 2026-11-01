@@ -10,6 +10,7 @@
 #include "player_storage.h"
 #include "player_volume.h"
 #include "player_auth.h"
+#include "player_ble.h"
 #include "player_media.h"
 #include "player_can.h"
 #include "esp_heap_caps.h"
@@ -483,6 +484,13 @@ static const char *INDEX_HTML =
 "    </form>"
 "  </div>"
 "  <div class='section'>"
+"    <h3>📶 Ім'я пристрою (BLE)</h3>"
+"    <label>Назва, яку бачить телефон при скануванні:</label><br>"
+"    <input type='text' id='ble-name' maxlength='31' style='width:100%;'><br><br>"
+"    <button class='btn' type='button' onclick='saveBleName()'>Зберегти</button>"
+"    <div id='ble-status' style='margin-top:1rem;color:#06c;'></div>"
+"  </div>"
+"  <div class='section'>"
 "    <h3>🚗 CAN-шина</h3>"
 "    <label>Швидкість:</label><br>"
 "    <select id='can-bitrate'>"
@@ -717,6 +725,18 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function loadBleName(){"
+"  fetch('/ble_settings').then(r=>r.json()).then(s=>{"
+"    document.getElementById('ble-name').value = s.name;"
+"  }).catch(e=>console.log('BLE name load error:',e));"
+"}"
+"function saveBleName(){"
+"  const n = document.getElementById('ble-name').value.trim();"
+"  if (!n) return;"
+"  fetch('/ble_settings?name=' + encodeURIComponent(n)).then(r=>r.json()).then(s=>{"
+"    document.getElementById('ble-status').textContent = 'Збережено: ' + s.name + ' (застосується після перезавантаження)';"
+"  }).catch(e=>{document.getElementById('ble-status').textContent = 'Помилка';});"
+"}"
 "function loadCanSettings(){"
 "  fetch('/can_settings').then(r=>r.json()).then(s=>{"
 "    document.getElementById('can-bitrate').value = s.bitrate;"
@@ -892,7 +912,7 @@ static const char *INDEX_HTML =
 "    }).catch(e=>{console.log('Error restarting:',e);});"
 "  }"
 "}"
-"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings();}catch(e){} };"
+"window.onload = function() { loadComponentLogs(); try{loadElm();}catch(e){} try{loadSeekSettings(); loadCanSettings(); loadBleName();}catch(e){} };"
 "</script>"
 
 "<footer style='text-align:center;padding:1rem;color:#666;font-size:0.9rem;'>Ford Player — веб-керування</footer>"
@@ -1120,6 +1140,24 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t ble_settings_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+
+    char buf[128];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char name[40] = {0};
+        if (httpd_query_key_value(buf, "name", name, sizeof(name)) == ESP_OK && name[0]) {
+            player_ble_set_name(name);
+        }
+    }
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"name\":\"%s\",\"reboot_required\":true}", player_ble_name());
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 static esp_err_t can_settings_handler(httpd_req_t *req)
 {
     REQUIRE_AUTH(req);
@@ -2154,6 +2192,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t ble_settings = {
+        .uri = "/ble_settings",
+        .method = HTTP_GET,
+        .handler = ble_settings_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t can_settings = {
         .uri = "/can_settings",
         .method = HTTP_GET,
@@ -2278,6 +2323,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &volume);
     httpd_register_uri_handler(s_server, &seek_settings);
     httpd_register_uri_handler(s_server, &can_settings);
+    httpd_register_uri_handler(s_server, &ble_settings);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);
