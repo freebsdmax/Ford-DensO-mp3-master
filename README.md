@@ -38,15 +38,34 @@
 
 ## Можливості
 
-- **MP3/FLAC/WAV/AAC/OGG/OPUS/AMR** з USB-флешки (ESP-ADF пайплайн)
-- Плейлист, збереження позиції відтворення, автоперехід треків
-- **BLE**: керування, статус, плейлист, логи, OTA
-- **Web UI** (Wi-Fi AP/STA): плеєр, налаштування, логи, OTA
-- **OTA** трьома шляхами: Wi-Fi (HTTP), BLE (бінарні кадри), UART → Slave
-- **CAN** (TWAI) + Wi-Fi CAN-sniffer + емуляція **ELM327**
+- **MP3/FLAC/WAV/AAC/OGG/OPUS/AMR** з USB-флешки (декодер вибирається за розширенням)
+- Плейлист з **ID3-назвами** (`Виконавець — Назва`), автозбереження позиції, автоперехід
+- **Програмна гучність 0–100 %** (PCM5102 не має апаратного регулятора) — для USB і Bluetooth
+- **Метадані з телефона (AVRCP)**: назва, виконавець, позиція, play/pause — у BLE і Web
+- **BLE**: керування, статус, плейлист, логи, OTA, усі налаштування
+- **Web UI** (Wi-Fi AP/STA): плеєр, налаштування, логи, OTA, токен доступу
+- **OTA**: Wi-Fi (HTTP), BLE (бінарні кадри → `/storage` → прошивка), UART → Slave
+- **CAN** (TWAI, 125/250/500 кбіт/с, налаштовувані ID і маски) + Wi-Fi CAN-sniffer + **ELM327**
 - Режими сну (idle / light / deep), NVS-налаштування
-- Логи за модулями (5 груп, вкл/викл на ходу)
-- Трансляція аудіо зі Slave по I2S (external mode)
+- Логи за модулями (5 груп) + **«чорна скринька»** у `/storage` (переживає перезавантаження)
+- Трансляція аудіо зі Slave по I2S (external mode) + **профілі буферів** (затримка/стійкість)
+- Статична IP/DNS для STA, токен доступу до веб/OTA, змінюване ім'я BLE
+
+## Налаштування в NVS (`audio_player`)
+
+| Ключ | Що | Типово |
+|---|---|---|
+| `volume` | гучність, % | 80 |
+| `seek_step` / `seek_mode` | крок перемотки (5–30 с) / метод (0=натискання, 1=утримання) | 10 / 0 |
+| `can_bitrate`, `can_id`, `can_mn`, `can_mp`, `can_mm`, `can_deb` | CAN-шина | 125, 0x2D5, 0x40, 0x80, 0x10, 500 |
+| `audio_profile` | 0=низька затримка, 1=збалансований, 2=стійкий | 1 |
+| `log_buf_kb` / `log_persist` | розмір буфера логів / «чорна скринька» | 4 / 1 |
+| `ble_name` | ім'я пристрою по BLE | `ESP32_MP3_Player` |
+| `auth_token` | токен HTTP/OTA (порожній = вимкнено) | — |
+| `net_static`, `net_ip`, `net_gw`, `net_mask`, `net_dns1`, `net_dns2` | статична IP для STA | DHCP |
+
+> Частина налаштувань застосовується після перезавантаження (ім'я BLE, розмір буфера логів,
+> статична IP, профіль буферів). Решта — одразу.
 
 ## Архітектура
 
@@ -137,12 +156,23 @@ idf.py -p COM6 flash monitor
 | `sleep.get` / `sleep.set` | режим сну (`sleep_mode`, `idle_timeout_sec`) |
 | `log_level.get/set`, `verbose.get/set` | рівень логів |
 | `component_logs.get/set` | модулі логів (`player/connect/ota/car/system`) |
-| `logs.get` | останні логи |
-| `playlist.get` | плейлист частинами |
+| `logs.get` | останні логи з кільцевого буфера |
+| `logs.cfg` / `logs.set` | розмір буфера (2/4/8/16 КБ) і «чорна скринька» |
+| `playlist.get` | плейлист частинами (назви з ID3) |
+| `media.get` | що грає на телефоні (AVRCP): назва, виконавець, позиція |
+| `volume.get` / `volume.set` | програмна гучність 0–100 % |
+| `seek.get` / `seek.set` | крок перемотки (5–30 с) і метод (натискання/утримання) |
+| `can.get` / `can.set` | швидкість CAN, ID кнопок, маски, антибрязкіт |
+| `audio.get` / `audio.set` | профіль аудіо-буферів (0/1/2) |
+| `net.get` / `net.set` | статична IP/DNS для STA |
+| `ble.get` / `ble.set` | ім'я пристрою по BLE (після перезавантаження) |
+| `auth.get` / `auth.set` | токен доступу до HTTP/OTA (порожній = вимкнено) |
 | `sniffer.set`, `device.restart` | сервісні |
 | `ota.begin/data/end/abort/status` | OTA (текстовий, застарілий) |
 | `slave_ota.*` | OTA Slave (застарілий) |
-| **`file.begin/data/finish/status/abort`** | OTA-файл: `target: "master" \| "slave"` |
+| **`file.begin/data/finish/status/abort`** | OTA-файл: `target: "master" \| "slave" \| "storage"` |
+| **`file.flash`** | прошити образ із `/storage` (`name`, `target`) |
+| **`file.stored`** | розміри збережених образів |
 
 **Бінарні OTA-кадри** (швидкий шлях, `file.begin` → кадри → `file.finish`):
 
@@ -163,8 +193,19 @@ idf.py -p COM6 flash monitor
 | `/upload_to_storage` | POST | завантажити файл у FAT |
 | `/ota_status`, `/version` | GET | прогрес і версії |
 | `/wifi_settings`, `/sleep_settings`, `/log_level`, `/verbose_logs`, `/component_logs` | GET/POST | налаштування |
-| `/logs` | GET | текстові логи |
+| `/volume?value=0..100` | GET | гучність |
+| `/seek_settings?step_s=&mode=` | GET/POST | перемотка |
+| `/can_settings?bitrate=&id=&mn=&mp=&mm=&debounce=` | GET/POST | CAN-шина |
+| `/audio_profile?profile=0/1/2` | GET/POST | профіль аудіо-буферів |
+| `/logs_config?buf_kb=&persist=` | GET/POST | буфер логів і «чорна скринька» |
+| `/net_settings?static=&ip=&gw=&mask=&dns1=&dns2=` | GET/POST | статична IP |
+| `/ble_settings?name=` | GET/POST | ім'я BLE |
+| `/logfile`, `/logfile?old=1` | GET | завантажити `/storage/log.txt` або `log.old` |
+| `/logs` | GET | текстові логи (RAM) |
 | `/restart` | POST | перезавантаження |
+
+> Усі змінювальні ендпоінти захищені токеном (`?token=…` або `X-Auth-Token`), якщо він заданий
+> (налаштування `auth.set`).
 
 ## UART до Slave
 

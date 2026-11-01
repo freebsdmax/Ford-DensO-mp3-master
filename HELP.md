@@ -156,6 +156,14 @@ curl.exe -X POST --data-binary "@build/Ford-DensO-mp3-master.bin" `
 | `sniffer.set` | CAN-сніфер ON/OFF |
 | `can_statistics.get` | кадри/байти/бітрейт |
 | `logs.get`, `log_level.*`, `verbose.*`, `component_logs.*` | логи |
+| `logs.cfg` / `logs.set` | буфер логів (2/4/8/16 КБ) + «чорна скринька» |
+| `volume.get/set` | програмна гучність 0–100 % |
+| `seek.get/set` | крок (5–30 с) і метод перемотки |
+| `can.get/set` | бітрейт, ID кнопок, маски, антибрязкіт |
+| `audio.get/set` | профіль аудіо-буферів |
+| `net.get/set` | статична IP/DNS |
+| `ble.get/set` | ім'я пристрою (після перезавантаження) |
+| `auth.get/set` | токен HTTP/OTA |
 | `device.restart` | перезавантаження |
 
 Керування плеєром (`sendCommand`, без RPC): `play`, `pause`, `next`, `prev`, `seek`.
@@ -210,16 +218,26 @@ Slave — AVRCP **CT**, телефон — **TG**. Slave підписуєтьс�
 | `/version`, `/ota_status` | версії та прогрес OTA |
 | `/logs`, `/log_level`, `/verbose_logs`, `/component_logs` | логи |
 | `/wifi_settings`, `/sleep_settings` | налаштування |
+| `/volume`, `/seek_settings`, `/can_settings` | гучність, перемотка, CAN |
+| `/audio_profile`, `/logs_config`, `/net_settings`, `/ble_settings` | буфери, логи, мережа, ім'я |
+| `/logfile`, `/logfile?old=1` | завантажити `/storage/log.txt` / `log.old` |
 | `/upload`, `/upload_slave`, `/upload_to_storage` | OTA |
 | `/restart` | перезавантаження |
+
+> Захист: якщо заданий токен (`auth.set`), змінювальні ендпоінти вимагають `?token=…`
+> або заголовок `X-Auth-Token`. Сторінка при першому 401 питає токен і зберігає його.
 | `/elm327_status`, `/elm327_config` | емулятор ELM327 |
 
 ## Логи
 
 5 груп: **плеєр**, **зв'язок** (BLE/Wi-Fi/UART), **OTA**, **авто** (CAN/ELM327),
 **система** (сон/NVS/USB). Групи вмикаються/вимикаються з застосунку
-(`component_logs.set`), логи пишуться в кільцевий буфер і віддаються в `/logs`.
-`verbose.*` додає емодзі та банери.
+(`component_logs.set`), логи пишуться в кільцевий буфер (2–16 КБ, `logs.set`) і віддаються
+в `/logs`. `verbose.*` додає емодзі та банери.
+
+**«Чорна скринька»** (`logs.set {persist:true}`, типово увімкнено): кожні 30 с нові рядки
+дописуються у `/storage/log.txt`, при 256 КБ — ротація у `log.old`. Файл переживає
+перезавантаження; забрати його можна через **`/logfile`** (або кнопками в Налаштуваннях веб-UI).
 
 ## Релізи та CI
 
@@ -246,6 +264,9 @@ git push origin v1.0.10
 | `COM6: Access is denied` | порт зайнятий іншим монітором/idf.py — закрити |
 | Прошивка впала | образ лишається в `/storage`, повторна спроба без інтернету |
 | Slave не оновлюється | Slave старіший за `v1.0.3` — раз прошити по USB |
+| Плата не піднімається / «цегла» | прошити `Ford-DensO-mp3-master-full.bin` на `0x0`:
+  з ПК (`esptool`) або з застосунку — «Прошивка по кабелю» (USB-OTG) |
+| Треба логи після збою | `http://<ip>/logfile` (або `/logfile?old=1`) |
 
 ## Корисні посилання
 
