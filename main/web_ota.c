@@ -609,6 +609,8 @@ static const char *INDEX_HTML =
 "    </select><br>"
 "    <label><input type='checkbox' id='log-persist'> Зберігати логи у /storage (чорна скринька)</label><br><br>"
 "    <button class='btn' type='button' onclick='saveLogsConfig()'>Зберегти</button>"
+"    <button class='btn' type='button' onclick='downloadLogFile(0)'>⬇️ Завантажити log.txt</button>"
+"    <button class='btn btn-secondary' type='button' onclick='downloadLogFile(1)'>⬇️ Завантажити log.old</button>"
 "    <div id='logs-status' style='margin-top:1rem;color:#06c;'></div>"
 "  </div>"
 "  <div class='section'>"
@@ -853,6 +855,17 @@ static const char *INDEX_HTML =
 "fr.onerror=()=>{log('Помилка читання файлу','#c00');};fr.readAsArrayBuffer(file.files[0]);};}"
 "setupForm('f1','file1','/upload');"
 "setupForm('f2','file2','/upload_slave');"
+"function downloadLogFile(old){"
+"  fetch('/logfile' + (old ? '?old=1' : ''))"
+"    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.blob(); })"
+"    .then(b => {"
+"      const a = document.createElement('a');"
+"      a.href = URL.createObjectURL(b);"
+"      a.download = old ? 'log.old.txt' : 'log.txt';"
+"      document.body.appendChild(a); a.click(); a.remove();"
+"    })"
+"    .catch(e => { document.getElementById('logs-status').textContent = 'Помилка: ' + e.message; });"
+"}"
 "function loadNetSettings(){"
 "  fetch('/net_settings').then(r=>r.json()).then(s=>{"
 "    document.getElementById('net-static').checked = !!s.static;"
@@ -1313,6 +1326,45 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
 }
 
 // Get player status as JSON
+static esp_err_t logfile_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+
+    /* ?old=1 - попередній файл (після ротації) */
+    bool want_old = false;
+    char buf[64];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[8] = {0};
+        if (httpd_query_key_value(buf, "old", val, sizeof(val)) == ESP_OK) {
+            want_old = (atoi(val) != 0);
+        }
+    }
+
+    const char *path = want_old ? "/storage/log.old" : "/storage/log.txt";
+    player_storage_init();
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Log file not found");
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       want_old ? "attachment; filename=\"log.old.txt\"" : "attachment; filename=\"log.txt\"");
+
+    char chunk[1024];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        if (httpd_resp_send_chunk(req, chunk, n) != ESP_OK) {
+            break;
+        }
+    }
+    fclose(f);
+    httpd_resp_send_chunk(req, NULL, 0);
+    return ESP_OK;
+}
+
 static esp_err_t net_settings_handler(httpd_req_t *req)
 {
     REQUIRE_AUTH(req);
@@ -2438,6 +2490,13 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL,
     };
 
+    httpd_uri_t logfile = {
+        .uri = "/logfile",
+        .method = HTTP_GET,
+        .handler = logfile_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t net_settings = {
         .uri = "/net_settings",
         .method = HTTP_GET,
@@ -2594,6 +2653,7 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &logs_config);
     httpd_register_uri_handler(s_server, &audio_profile);
     httpd_register_uri_handler(s_server, &net_settings);
+    httpd_register_uri_handler(s_server, &logfile);
     httpd_register_uri_handler(s_server, &sleep_settings_get);
     httpd_register_uri_handler(s_server, &sleep_settings_post);
     httpd_register_uri_handler(s_server, &wifi_settings_get);
