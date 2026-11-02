@@ -74,10 +74,15 @@ static void apply_task(void *arg)
     s_applied = 0;
     esp_err_t err = ESP_OK;
 
-    // 1) Persist the received image into the staging partition
-    if (s_part) {
+    // 1) Persist the received image into the staging partition.
+    //    The slot is 2 MB, while a current master image is ~2.04 MB, so a
+    //    larger image simply skips staging (it is applied from RAM anyway).
+    if (s_part && s_total > s_part->size) {
+        ESP_LOGW(TAG, "Image %u > staging %u, skipping staging write",
+                 (unsigned)s_total, (unsigned)s_part->size);
+    } else if (s_part) {
         size_t aligned = (s_total + 4095) & ~((size_t)4095);
-        if (aligned > s_part->size) aligned = s_total;
+        if (aligned > s_part->size) aligned = s_part->size;
         err = esp_partition_erase_range(s_part, 0, aligned);
         if (err == ESP_OK) {
             uint8_t *block = heap_caps_malloc(4096, MALLOC_CAP_8BIT);
@@ -165,14 +170,26 @@ esp_err_t file_ota_begin(size_t total_size, int target)
         heap_caps_free(s_buf);
         s_buf = NULL;
     }
-    if (total_size < 1024 || total_size > (2 * 1024 * 1024)) {
-        set_error("invalid firmware size");
-        return ESP_ERR_INVALID_SIZE;
-    }
     if (target != FILE_OTA_TARGET_MASTER && target != FILE_OTA_TARGET_SLAVE &&
         target != FILE_OTA_TARGET_STORAGE) {
         set_error("invalid target");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Master/storage images go straight into the inactive OTA slot, so the
+       limit is the slot size (3 MB), not an old hardcoded 2 MB that rejected
+       builds after the decoders were added. Slave images travel over UART and
+       keep the UART protocol limit. */
+    size_t max_size = (2 * 1024 * 1024);
+    if (target != FILE_OTA_TARGET_SLAVE) {
+        const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
+        if (upd && upd->size > max_size) max_size = upd->size;
+    }
+    if (total_size < 1024 || total_size > max_size) {
+        ESP_LOGE(TAG, "Image %u bytes out of range (max %u)",
+                 (unsigned)total_size, (unsigned)max_size);
+        set_error("invalid firmware size");
+        return ESP_ERR_INVALID_SIZE;
     }
     s_delete_after = false;
 
@@ -351,6 +368,18 @@ esp_err_t file_ota_flash_stored(const char *name, int target)
         heap_caps_free(buf);
         set_error("not a firmware .bin (bad magic)");
         return ESP_ERR_OTA_VALIDATE_FAILED;
+    }
+
+    size_t max_size = (2 * 1024 * 1024);
+    if (target != FILE_OTA_TARGET_SLAVE) {
+        const esp_partition_t *upd = esp_ota_get_next_update_partition(NULL);
+        if (upd && upd->size > max_size) max_size = upd->size;
+    }
+    if (len > max_size) {
+        ESP_LOGE(TAG, "Stored image %u > max %u", (unsigned)len, (unsigned)max_size);
+        heap_caps_free(buf);
+        set_error("firmware image is too large");
+        return ESP_ERR_INVALID_SIZE;
     }
 
     if (s_buf) heap_caps_free(s_buf);

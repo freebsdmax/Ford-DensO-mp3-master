@@ -2054,8 +2054,8 @@ static esp_err_t upload_to_storage_handler(httpd_req_t *req)
 
     /* Keep the image in the internal FAT partition (/storage) so it can be
        flashed later and is deleted only after a successful update. */
-    if (req->content_len <= 0 || req->content_len > (2 * 1024 * 1024)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний розмір прошивки (макс. 2 МБ)");
+    if (req->content_len <= 0 || req->content_len > (3 * 1024 * 1024)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Невірний розмір прошивки (макс. 3 МБ)");
         return ESP_FAIL;
     }
     if (player_storage_init() != ESP_OK) {
