@@ -1,6 +1,8 @@
 #include "player_usb.h"
 #include "player_nvs.h"
 #include "esp_log.h"
+#include "esp_attr.h"
+#include "esp_system.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -163,6 +165,18 @@ static void usb_forget_devices(void)
     g_current_mount_slot = -1;
 }
 
+/* Флешка після ресету перелічується через раз (перевірено: 0,1,0,1...).
+   Тому, якщо після старту вона не з'явилась — робимо РІВНО ОДИН
+   автоматичний перезапуск; прапорець у RTC не дає зациклитись. */
+/* RTC_NOINIT_ATTR (а не RTC_DATA_ATTR): .rtc.data переініціалізується при
+   кожному esp_restart(), тому прапорець скидався і виходив ребут-цикл.
+   .rtc.noinit переживає reset; валідність перевіряємо магією. */
+RTC_NOINIT_ATTR static uint32_t s_usb_retry_magic;
+RTC_NOINIT_ATTR static uint32_t s_usb_retry_done;
+#define USB_RETRY_MAGIC 0x55534231u   /* "USB1" */
+
+extern int32_t g_saved_track_index;
+
 static const usb_host_config_t s_host_config = { .intr_flags = ESP_INTR_FLAG_LEVEL1 };
 static const msc_host_driver_config_t s_msc_config = {
     .create_backround_task = true,
@@ -172,48 +186,22 @@ static const msc_host_driver_config_t s_msc_config = {
 };
 
 /*
- * Безпечний перезапуск USB-стека.
+ * Керування USB-стеком: НІКОЛИ не викликаємо usb_host_uninstall().
  *
- * usb_host_uninstall() усередині робить ESP_ERROR_CHECK(hub_uninstall()) і
- * викликає abort(), якщо кореневий порт ще живлений (тобто флешка ще висить
- * на шині). Тому спочатку звільняємо ВСІ пристрої і чекаємо подію
- * USB_HOST_LIB_EVENT_FLAGS_ALL_FREE — лише після неї uninstall безпечний.
+ * Усередині hub_uninstall() стоїть ESP_ERROR_CHECK(hcd_port_deinit()), і якщо
+ * кореневий порт ще живлений (флешка на шині), плата падає в abort() і йде в
+ * ребут-цикл. Перевірено на платі: і uninstall, і "м'який" рестарт MSC
+ * втрачають уже перелічений пристрій і не повертають його. Тому стек
+ * ставиться один раз при старті, а далі ми лише скануємо шину.
  */
-static esp_err_t usb_stack_restart(void)
-{
-    usb_forget_devices();
-    if (usb_host_device_free_all() != ESP_OK) {
-        ESP_LOGW(TAG_USB, "USB restart: free_all failed");
-        return ESP_FAIL;
-    }
-
-    bool all_free = false;
-    for (int i = 0; i < 40 && !all_free; i++) {
-        uint32_t flags = 0;
-        if (usb_host_lib_handle_events(pdMS_TO_TICKS(50), &flags) == ESP_OK &&
-            (flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE)) {
-            all_free = true;
-        }
-    }
-    if (!all_free) {
-        ESP_LOGW(TAG_USB, "USB restart: devices still attached, skipped");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    esp_err_t err = usb_host_uninstall();
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG_USB, "USB restart: uninstall %s", esp_err_to_name(err));
-        return err;
-    }
-    vTaskDelay(pdMS_TO_TICKS(200));
-    err = usb_host_install(&s_host_config);
-    if (err == ESP_OK) err = msc_host_install(&s_msc_config);
-    ESP_LOGW(TAG_USB, "USB restart: %s", esp_err_to_name(err));
-    return err;
-}
 
 void usb_task(void *args)
 {
+    if (s_usb_retry_magic != USB_RETRY_MAGIC) {
+        /* Свіже вмикання живлення: дозволяємо рівно одну спробу. */
+        s_usb_retry_magic = USB_RETRY_MAGIC;
+        s_usb_retry_done = 0;
+    }
     ESP_ERROR_CHECK(usb_host_install(&s_host_config));
     ESP_ERROR_CHECK(msc_host_install(&s_msc_config));
 
@@ -224,6 +212,7 @@ void usb_task(void *args)
     int reinit_count = 0;
     bool usb_detected = false;
     int last_num_dev = -1;
+    int no_usb_ticks = 0;
 
     while (true) {
         uint32_t event_flags;
@@ -238,13 +227,32 @@ void usb_task(void *args)
                 ESP_LOGW(TAG_USB, "USB re-init skipped: device is mounted");
                 continue;
             }
-            ESP_LOGW(TAG_USB, "Manual USB stack re-init requested");
-            usb_stack_restart();
+            ESP_LOGW(TAG_USB, "Manual USB re-scan requested");
+            usb_detected = false;
             signaled_count = 0;
             reinit_count = 0;
             scans = 0;
             scan_ticks = 0;
             continue;
+        }
+
+        /* Авто-перезапуск, якщо флешка не з'явилась (див. коментар вище). */
+        if (g_usb_mounted) {
+            /* Прапорець НЕ скидаємо: інакше невдале монтування після
+               підключення знову вмикає автоперезапуск і виходить цикл. */
+            no_usb_ticks = 0;
+        } else if (!g_mode_external) {
+            if (++no_usb_ticks >= 30) {
+                no_usb_ticks = 0;
+                if (s_usb_retry_done == 0) {
+                    s_usb_retry_done = 1;
+                    ESP_LOGW(TAG_USB, "USB flash not detected after 3 s - one automatic reboot");
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    esp_restart();
+                }
+            }
+        } else {
+            no_usb_ticks = 0;
         }
 
         // While the app is still booting, periodically look for devices that
@@ -282,23 +290,16 @@ void usb_task(void *args)
                 }
             }
 
-            // Nothing detected: the drive stayed powered across MCU reset and
-            // did not re-enumerate. Re-initialise the whole USB stack once to
-            // force a bus reset / re-enumeration.
-            if (!usb_detected && num_dev == 0 && !g_usb_mounted && reinit_count < 3 && scans >= 6) {
-                ESP_LOGW(TAG_USB, "No USB device after boot, restarting USB stack");
-                usb_stack_restart();
-                reinit_count++;
-                signaled_count = 0;
-                scans = 0;
-                scan_ticks = 0;
-            }
+            /* Якщо пристрій так і не з'явився — нічого не перезапускаємо:
+               перевірено на платі, що msc-рестарт втрачає вже перелічений
+               пристрій і не повертає його. Чекаємо наступного підключення. */
         }
     }
 
     vTaskDelay(10);
     ESP_LOGI(TAG_USB, "🧹 Деініціалізація USB");
-    ESP_ERROR_CHECK(usb_host_uninstall());
+    /* usb_host_uninstall() тут НЕ викликаємо: hub_uninstall() робить abort(),
+       якщо кореневий порт ще живлений. Задача завершується — стек лишається. */
     vTaskDelete(NULL);
 }
 
