@@ -627,6 +627,16 @@ void play_test_tone(audio_element_handle_t i2s_writer, int duration_ms)
     ESP_LOGI(TAG_PIPE, "✅ Тестовий тон завершено (записано %d семплів)", samples_written);
 }
 
+/* Елементи без власного callback (volume, passthrough I2S) інакше пишуть
+   події у свій 5-слотний external-queue, який ніхто не читає, і кожна подія
+   після п'ятої логується як "There is no space in external queue". */
+static esp_err_t silent_event_cb(audio_element_handle_t el,
+                                 audio_event_iface_msg_t *event, void *ctx)
+{
+    (void)el; (void)event; (void)ctx;
+    return ESP_OK;
+}
+
 esp_err_t audio_event_cb(audio_element_handle_t el, audio_event_iface_msg_t *event, void *ctx)
 {
     if (event->cmd == AEL_MSG_CMD_REPORT_STATUS) {
@@ -1131,6 +1141,9 @@ void i2s_passthrough_task(void *pvParameters)
     i2s_writer_cfg.std_cfg.slot_cfg.slot_mode = I2S_SLOT_MODE_STEREO;
 
     audio_element_handle_t i2s_writer = i2s_stream_init(&i2s_writer_cfg);
+    if (i2s_writer) {
+        audio_element_set_event_callback(i2s_writer, silent_event_cb, NULL);
+    }
     if (!i2s_writer) {
         ESP_LOGE(TAG_PIPE, "❌ Writer error");
         i2s_del_channel(rx_handle);
@@ -1368,6 +1381,9 @@ void player_task(void *pvParam)
 
         /* Software volume: PCM5102 has no hardware volume control. */
         volume_stream = volume_stream_init();
+        if (volume_stream) {
+            audio_element_set_event_callback(volume_stream, silent_event_cb, NULL);
+        }
 
         if (!fatfs_stream_reader || !i2s_stream_writer || !decoder || !volume_stream) {
             ESP_LOGE(TAG_PIPE, "❌ Не вдалося створити аудіо елементи");

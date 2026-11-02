@@ -1095,15 +1095,12 @@ if (g_board_handle) {
         ESP_LOGW(TAG, "⚠️ BLE Player Service ініціалізація не вдалася: %s", esp_err_to_name(ble_err));
     }
     
-    // �🔍 Враховуємо останній вибраний режим: якщо external — запускаємо його навіть без USB
-    if (g_last_source_pref == 1 && !g_mode_external) {
-        ESP_LOGI(TAG, "🎚️ Відновлення режиму: External input");
-        if (start_external_input() == ESP_OK) {
-            g_mode_external = true;
-            ESP_LOGI(TAG, "✅ External input активовано на старті");
-        } else {
-            ESP_LOGW(TAG, "⚠️ Не вдалося запустити external input при старті");
-        }
+    // 🎚️ Стартуємо завжди з USB: флешка має пріоритет. Раніше тут
+    // відновлювався External з NVS, і після перезавантаження плата
+    // мовчала, поки режим не перемкнуть вручну.
+    if (g_last_source_pref == 1) {
+        ESP_LOGI(TAG, "ℹ️ Останній режим був External — стартуємо з USB (пріоритет флешки)");
+        save_last_source_pref(0);
     }
     
     // === КРИТЕРІЙ 11: Головний цикл обробки повідомлень - має бути один ===
@@ -1162,12 +1159,14 @@ if (g_board_handle) {
                     ESP_LOGI(TAG, "🔍 4. Створення плейлисту...");
                     create_playlist_from_usb();
 
-                    // Якщо користувач раніше обрав External і він активний, не перезапускаємо плеєр з USB
-                    if (g_mode_external || g_last_source_pref == 1) {
-                        ESP_LOGI(TAG, "ℹ️ External режим у пріоритеті — USB змонтовано без автозапуску відтворення");
-                        g_processing_connect = false;
-                        continue;
+                    // Флешка має пріоритет: якщо вона змонтована — виходимо з External
+                    // і граємо з USB. Повернутися в External можна чипом у застосунку.
+                    if (g_mode_external) {
+                        ESP_LOGI(TAG, "🔀 USB змонтовано — вимикаємо External, граємо з флешки");
+                        stop_external_input();
+                        g_mode_external = false;
                     }
+                    save_last_source_pref(0);
                     
                     if (g_playlist_ready) {
                         ESP_LOGI(TAG, "✅ Плейлист створено: знайдено %d треків", g_playlist_size);
@@ -1537,11 +1536,11 @@ if (g_board_handle) {
                     ESP_LOGI(TAG, "═══════════════════════════════════════════════");
                     // Якщо флешка відсутня — автоматично переключаємось на зовнішній вхід
                     if (!g_mode_external && !g_usb_mounted) {
-                        ESP_LOGI(TAG, "ℹ️ USB відсутній — автоматичне включення зовнішнього входу");
+                        ESP_LOGI(TAG, "ℹ️ USB відсутній — тимчасово вмикаємо зовнішній вхід");
                         if (start_external_input() == ESP_OK) {
                             g_mode_external = true;
-                            // Зберігаємо перевагу джерела як External, щоб після перезапуску лишитися на вході
-                            save_last_source_pref(1);
+                            // Не зберігаємо це як постійний вибір: інакше після
+                            // перезавантаження плата не грає з флешки.
                         } else {
                             ESP_LOGW(TAG, "⚠️ Не вдалося автоматично запустити зовнішній вхід");
                         }
