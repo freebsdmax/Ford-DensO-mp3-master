@@ -213,6 +213,8 @@ void usb_task(void *args)
     bool usb_detected = false;
     int last_num_dev = -1;
     int no_usb_ticks = 0;
+    int boot_ticks = 0;          /* вікно після старту, ~100 мс/тік */
+    bool ever_mounted = false;   /* флешка хоч раз змонтувалась */
 
     while (true) {
         uint32_t event_flags;
@@ -236,15 +238,18 @@ void usb_task(void *args)
             continue;
         }
 
-        /* Авто-перезапуск, якщо флешка не з'явилась (див. коментар вище). */
+        /* Авто-перезапуск ТІЛЬКИ одразу після старту (перші ~15 с) і лише
+           якщо флешка жодного разу не монтувалась. Інакше короткочасне
+           «відпадання» флешки під час гри викликало раптовий reboot. */
+        if (boot_ticks < 150) boot_ticks++;
+
         if (g_usb_mounted) {
-            /* Прапорець НЕ скидаємо: інакше невдале монтування після
-               підключення знову вмикає автоперезапуск і виходить цикл. */
+            ever_mounted = true;
             no_usb_ticks = 0;
-        } else if (!g_mode_external) {
+        } else if (!g_mode_external && boot_ticks < 150) {
             if (++no_usb_ticks >= 30) {
                 no_usb_ticks = 0;
-                if (s_usb_retry_done == 0) {
+                if (s_usb_retry_done == 0 && !ever_mounted) {
                     s_usb_retry_done = 1;
                     ESP_LOGW(TAG_USB, "USB flash not detected after 3 s - one automatic reboot");
                     vTaskDelay(pdMS_TO_TICKS(200));
