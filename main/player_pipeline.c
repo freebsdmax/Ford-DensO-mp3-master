@@ -1424,34 +1424,28 @@ void player_task(void *pvParam)
         // Якщо є запит на відновлення позиції — спробуємо встановити її ДО запуску пайплайна,
         // щоб декодер отримав зчитування починаючи з потрібного байту і не відтворював початок.
         if (g_restore_playback && g_current_track == g_saved_track_index && g_saved_position_ms > 0) {
-            audio_element_info_t info_pre = {0};
-            if (audio_element_getinfo(fatfs_stream_reader, &info_pre) == ESP_OK && info_pre.total_bytes > 0) {
-                size_t target_bytes_pre = position_ms_to_bytes(g_saved_position_ms, info_pre.total_bytes);
-                if (target_bytes_pre > (size_t)(info_pre.total_bytes * 0.9)) {
-                    target_bytes_pre = (size_t)(info_pre.total_bytes * 0.9);
-                }
-                ESP_LOGI(TAG_PIPE, "🌅 Спроба відновлення ДО запуску пайплайна: %d байт", (int)target_bytes_pre);
-                esp_err_t ret_pre = audio_element_set_byte_pos(fatfs_stream_reader, target_bytes_pre);
-                if (ret_pre == ESP_OK) {
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    audio_element_info_t new_info_pre = {0};
-                    if (audio_element_getinfo(fatfs_stream_reader, &new_info_pre) == ESP_OK) {
-                        int actual_ms_pre = (int)((new_info_pre.byte_pos * 1000) / 16000);
-                        ESP_LOGI(TAG_PIPE, "✅ Позиція (до запуску) встановлена: %d байт (~%d мс)", (int)new_info_pre.byte_pos, actual_ms_pre);
-                        g_last_saved_position = actual_ms_pre;
-                        // Якщо вдалося — скидаємо прапори відновлення, щоб не повторювати після старту
-                        g_restore_playback = false;
-                        g_saved_track_index = -1;
-                        g_saved_position_ms = 0;
-                    }
-                } else {
-                    ESP_LOGW(TAG_PIPE, "⚠️ Не вдалося встановити позицію до запуску пайплайна: %s", esp_err_to_name(ret_pre));
-                }
+            /* У цій версії ADF audio_element_set_byte_pos() лише записує
+               info.byte_pos, а fatfs переміщує вказівник файлу ПРИ ВІДКРИТТІ.
+               Тому позицію ставимо ДО audio_pipeline_run; байти рахуємо за
+               реальним бітрейтом (розмір файлу ще невідомий). */
+            size_t target_bytes_pre = (s_bitrate_kbps > 0)
+                ? (size_t)(((int64_t)g_saved_position_ms * s_bitrate_kbps) / 8)
+                : (size_t)(((int64_t)g_saved_position_ms * 16000) / 1000);
+
+            esp_err_t ret_pre = audio_element_set_byte_pos(fatfs_stream_reader, (int)target_bytes_pre);
+            if (ret_pre == ESP_OK) {
+                ESP_LOGI(TAG_PIPE, "Відновлення позиції до старту: %d мс -> %d байт",
+                         (int)g_saved_position_ms, (int)target_bytes_pre);
+                g_last_saved_position = g_saved_position_ms;
+                g_restore_playback = false;
+                g_saved_track_index = -1;
+                g_saved_position_ms = 0;
             } else {
-                ESP_LOGI(TAG_PIPE, "ℹ️ Інфо файлу недоступне до запуску пайплайна, спробуємо після старту");
+                ESP_LOGW(TAG_PIPE, "Не вдалося виставити позицію до старту: %s",
+                         esp_err_to_name(ret_pre));
             }
         }
-        
+
         // 📞 Встановити callback для відстеження завершення
         audio_element_set_event_callback(fatfs_stream_reader, audio_event_cb, &playback_finished);
 
@@ -1528,75 +1522,11 @@ void player_task(void *pvParam)
                                        dec_info.bits, dec_info.channels);
                 }
                 
-                // 🌅 СПРОБА ВІДНОВЛЕННЯ ПОЗИЦІЇ
-                ESP_LOGI(TAG_PIPE, "Restore check: restore=%d cur=%d saved=%d pos=%d",
-                         (int)g_restore_playback, (int)g_current_track,
-                         (int)g_saved_track_index, (int)g_saved_position_ms);
-                if (g_restore_playback && g_current_track == g_saved_track_index && g_saved_position_ms > 0) {
-                    ESP_LOGI(TAG_PIPE, "");
-                    ESP_LOGI(TAG_PIPE, "╔═══════════════════════════════════════════════╗");
-                    ESP_LOGI(TAG_PIPE, "║  🌅 ВІДНОВЛЕННЯ ПОЗИЦІЇ                       ║");
-                    ESP_LOGI(TAG_PIPE, "╠═══════════════════════════════════════════════╣");
-                    ESP_LOGI(TAG_PIPE, "║  🎵 Трек: %d", g_current_track);
-                    ESP_LOGI(TAG_PIPE, "║  ⏱️  Позиція: %d мс (%.1f сек)", g_saved_position_ms, g_saved_position_ms / 1000.0);
-                    ESP_LOGI(TAG_PIPE, "╚═══════════════════════════════════════════════╝");
-                    
-                    // Даем время на инициализацию
-                    vTaskDelay(pdMS_TO_TICKS(300));
-                    
-                    // Получаем информацию о файле
-                    audio_element_info_t info = {0};
-                    if (audio_element_getinfo(fatfs_stream_reader, &info) == ESP_OK && info.total_bytes > 0) {
-                        ESP_LOGI(TAG_PIPE, "   Розмір файлу: %d байт", (int)info.total_bytes);
-                        
-                        // Вычисляем позицию в байтах
-                        // Для MP3 примерно: 1 секунда = 16000 байт (128kbps)
-                        size_t target_bytes = position_ms_to_bytes(g_saved_position_ms, info.total_bytes);
-                        
-                        // Ограничиваем 90% файла
-                        if (target_bytes > (size_t)(info.total_bytes * 0.9)) {
-                            target_bytes = (size_t)(info.total_bytes * 0.9);
-                            ESP_LOGW(TAG_PIPE, "   Позиція скоригована до %d байт", (int)target_bytes);
-                        }
-                        
-                        ESP_LOGI(TAG_PIPE, "   Встановлюємо позицію: %d байт", (int)target_bytes);
-                        
-                        // ⏳ Задержка перед установкой
-                        vTaskDelay(pdMS_TO_TICKS(100));
-                        
-                        // Пробуем несколько раз установить позицию
-                        for (int attempt = 0; attempt < 5; attempt++) {
-                            ret = audio_element_set_byte_pos(fatfs_stream_reader, target_bytes);
-                            
-                            if (ret == ESP_OK) {
-                                ESP_LOGI(TAG_PIPE, "✅ Позиція встановлена на спробі %d", attempt + 1);
-                                
-                                // Проверяем результат
-                                vTaskDelay(pdMS_TO_TICKS(200));
-                                audio_element_info_t new_info = {0};
-                                if (audio_element_getinfo(fatfs_stream_reader, &new_info) == ESP_OK) {
-                                    int actual_ms = (int)((new_info.byte_pos * 1000) / 16000);
-                                    ESP_LOGI(TAG_PIPE, "   Фактична позиція: %d байт (~%d мс)", 
-                                             (int)new_info.byte_pos, actual_ms);
-                                    
-                                    // Обновляем сохраненную позицию
-                                    g_last_saved_position = actual_ms;
-                                }
-                                break;
-                            } else {
-                                ESP_LOGW(TAG_PIPE, "⚠️ Спроба %d не вдалась: %s", 
-                                         attempt + 1, esp_err_to_name(ret));
-                                vTaskDelay(pdMS_TO_TICKS(200));
-                            }
-                        }
-                    }
-                    
-                    // 🔄 Скидаємо прапори ВНЕЗАВИСИМО от результата
-                    g_restore_playback = false;
-                    g_saved_track_index = -1;
-                    g_saved_position_ms = 0;
-                    ESP_LOGI(TAG_PIPE, "✅ Відновлення позиції оброблено");
-                }
+                /* Відновлення позиції робиться ДО старту (вище): у цій
+                   версії ADF у fatfs немає seek-колбека, тому підміна
+                   byte_pos після відкриття лише малювала неправдиву
+                   позицію, а звук ішов з початку. */
+
                 break;
             }
             
