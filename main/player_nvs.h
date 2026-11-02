@@ -11,6 +11,8 @@ esp_err_t nvs_read_i32_def(const char *ns, const char *key, int32_t def_val, int
 esp_err_t nvs_write_str(const char *ns, const char *key, const char *str);
 esp_err_t nvs_read_str_def(const char *ns, const char *key, char *buf, size_t buf_len, const char *def_str);
 esp_err_t save_playback_position(int32_t track_index, int32_t position_ms);
+/** Швидке збереження позиції в RTC-пам'ять (без запису у flash). */
+void save_playback_position_rtc(int32_t track_index, int32_t position_ms);
 esp_err_t load_playback_position(int32_t *track_index, int32_t *position_ms);
 esp_err_t clear_playback_position(void);
 esp_err_t init_nvs(void);

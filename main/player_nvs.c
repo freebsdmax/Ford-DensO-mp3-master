@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
+#include "esp_attr.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -124,8 +125,30 @@ esp_err_t save_playback_position(int32_t track_index, int32_t position_ms) {
     return err;
 }
 
+/* --- RTC-копія позиції: переживає deep sleep, не торкається flash --- */
+#define RTC_POS_MAGIC 0x504F5331u   /* "POS1" */
+RTC_DATA_ATTR static int32_t s_rtc_track = -1;
+RTC_DATA_ATTR static int32_t s_rtc_pos_ms = 0;
+RTC_DATA_ATTR static uint32_t s_rtc_magic = 0;
+
+void save_playback_position_rtc(int32_t track_index, int32_t position_ms)
+{
+    if (track_index < 0 || position_ms < 0) return;
+    s_rtc_track = track_index;
+    s_rtc_pos_ms = position_ms;
+    s_rtc_magic = RTC_POS_MAGIC;
+}
+
 esp_err_t load_playback_position(int32_t *track_index, int32_t *position_ms)
 {
+    /* Після deep sleep RTC-значення свіжіші за NVS — беремо їх. */
+    if (s_rtc_magic == RTC_POS_MAGIC && s_rtc_track >= 0) {
+        *track_index = s_rtc_track;
+        *position_ms = s_rtc_pos_ms;
+        ESP_LOGI(TAG_NVS, "RTC position: track=%d, pos=%d ms", (int)s_rtc_track, (int)s_rtc_pos_ms);
+        return ESP_OK;
+    }
+
     nvs_handle_t nvs_handle;
     esp_err_t err;
     

@@ -23,6 +23,20 @@
 #include "audio_element.h"
 static const char *TAG_PIPE = "Player";
 
+/* Бітрейт поточного MP3 (kbps) з аналізу заголовка. Без нього перерахунок
+   "байти -> час" для 256/320 kbps завищував час у 2-2.5 раза. */
+static int32_t s_bitrate_kbps = 0;
+
+/* мс -> байти файлу через РЕАЛЬНУ тривалість (а не 16 КБ/с для 128 kbps). */
+static size_t position_ms_to_bytes(int32_t position_ms, int32_t total_bytes)
+{
+    if (position_ms <= 0) return 0;
+    if (g_current_track_duration_ms > 0 && total_bytes > 0) {
+        return (size_t)(((int64_t)position_ms * total_bytes) / g_current_track_duration_ms);
+    }
+    return (size_t)(((int64_t)position_ms * 16000) / 1000);
+}
+
 extern size_t g_stall_last_bytes;
 extern int64_t g_stall_last_ts_ms;
 extern int32_t g_current_track_duration_ms;
@@ -545,7 +559,7 @@ esp_err_t set_playback_position(audio_element_handle_t fatfs_stream_reader, int 
     
     // Вычисляем позицию в байтах
     // Для MP3 примерно: 1 секунда = 16000 байт (для 128kbps)
-    size_t target_bytes = (size_t)((position_ms * 16000) / 1000);
+    size_t target_bytes = position_ms_to_bytes(position_ms, info.total_bytes);
     
     // Ограничиваем 90% файла
     if (target_bytes > (size_t)(info.total_bytes * 0.9)) {
@@ -819,6 +833,8 @@ void analyze_mp3_file(const char *filename) {
     ESP_LOGI(TAG_PIPE, "🎵 MP3 аналіз - Файл: %s", filename);
     ESP_LOGI(TAG_PIPE, "🎵 Бітрейт: %d kbps, Семпл рейт: %d Hz", bitrate, sample_rate);
     
+    s_bitrate_kbps = bitrate;
+
     // Попередження про потенційні проблеми з продуктивністю
     if (bitrate > 192) {
         ESP_LOGW(TAG_PIPE, "⚠️ Високий бітрейт (%d kbps) - можливі проблеми з декодуванням!", bitrate);
@@ -1337,7 +1353,8 @@ void player_task(void *pvParam)
         const char *cur_ext = strrchr(g_playlist[g_current_track], '.');
         if (cur_ext && strcasecmp(cur_ext, ".mp3") == 0) {
             ESP_LOGI(TAG_PIPE, "🔍 Аналіз файлу: %s", g_playlist[g_current_track]);
-            analyze_mp3_file(g_playlist[g_current_track]);
+            s_bitrate_kbps = 0;
+ analyze_mp3_file(g_playlist[g_current_track]);
         }
         
         if (!g_usb_mounted) {
@@ -1408,7 +1425,7 @@ void player_task(void *pvParam)
         if (g_restore_playback && g_current_track == g_saved_track_index && g_saved_position_ms > 0) {
             audio_element_info_t info_pre = {0};
             if (audio_element_getinfo(fatfs_stream_reader, &info_pre) == ESP_OK && info_pre.total_bytes > 0) {
-                size_t target_bytes_pre = (size_t)((g_saved_position_ms * 16000) / 1000);
+                size_t target_bytes_pre = position_ms_to_bytes(g_saved_position_ms, info_pre.total_bytes);
                 if (target_bytes_pre > (size_t)(info_pre.total_bytes * 0.9)) {
                     target_bytes_pre = (size_t)(info_pre.total_bytes * 0.9);
                 }
@@ -1490,7 +1507,12 @@ void player_task(void *pvParam)
                     // Fallback: приблизний розрахунок для 128 kbps
                     audio_element_info_t file_info = {0};
                     if (audio_element_getinfo(fatfs_stream_reader, &file_info) == ESP_OK && file_info.total_bytes > 0) {
-                        g_current_track_duration_ms = (int32_t)((file_info.total_bytes * 1000) / 16000);
+                        if (s_bitrate_kbps > 0) {
+                            /* Точна тривалість для CBR MP3: мс = байти * 8 / (кбіт/с) */
+                            g_current_track_duration_ms = (int32_t)(((int64_t)file_info.total_bytes * 8) / s_bitrate_kbps);
+                        } else {
+                            g_current_track_duration_ms = (int32_t)((file_info.total_bytes * 1000) / 16000);
+                        }
                         int corrected_duration = g_current_track_duration_ms;
                         ESP_LOGI(TAG_PIPE, "📊 Приблизна тривалість треку: %d мс (%d:%02d)", corrected_duration, 
                                  corrected_duration / 60000, (corrected_duration % 60000) / 1000);
@@ -1529,7 +1551,7 @@ void player_task(void *pvParam)
                         
                         // Вычисляем позицию в байтах
                         // Для MP3 примерно: 1 секунда = 16000 байт (128kbps)
-                        size_t target_bytes = (size_t)((g_saved_position_ms * 16000) / 1000);
+                        size_t target_bytes = position_ms_to_bytes(g_saved_position_ms, info.total_bytes);
                         
                         // Ограничиваем 90% файла
                         if (target_bytes > (size_t)(info.total_bytes * 0.9)) {
@@ -1612,18 +1634,11 @@ void player_task(void *pvParam)
             int current_position = get_current_position(fatfs_stream_reader);
             
             if (current_position > 0) {
+                /* Позиція живе в RAM + RTC (переживає deep sleep).
+                   У NVS пишемо ЛИШЕ на паузі, зміні треку та перед сном —
+                   під час музики flash не чіпаємо взагалі, щоб не було «тиків». */
                 g_last_saved_position = current_position;
-                
-                // Автосохранение каждые 60 секунд или при значительном изменении
-                if (current_time - g_last_position_save_time >= pdMS_TO_TICKS(POSITION_SAVE_INTERVAL_MS)) {
-                    
-                    save_playback_position(g_current_track, (int32_t)current_position);
-                    g_last_position_save_time = current_time;
-                    
-                    if (timeout_counter % 60 == 0) { // Логируем каждые 6 секунд
-                        ESP_LOGI(TAG_PIPE, "💾 Автозбереження: %d мс", current_position);
-                    }
-                }
+                save_playback_position_rtc(g_current_track, (int32_t)current_position);
             }
             
             // ⏸️ Перевірка на паузу через веб — реагуємо лише на ЗМІНУ стану.

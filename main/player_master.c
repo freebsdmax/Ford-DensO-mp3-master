@@ -1314,6 +1314,7 @@ if (g_board_handle) {
                         } else {
                             // Pause
                             g_is_paused = true;
+                            save_playback_position(g_current_track, g_last_saved_position);
                             ESP_LOGI(TAG, "⏸️ Pausing playback via BLE");
                         }
                     } else {
