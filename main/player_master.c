@@ -1095,12 +1095,16 @@ if (g_board_handle) {
         ESP_LOGW(TAG, "⚠️ BLE Player Service ініціалізація не вдалася: %s", esp_err_to_name(ble_err));
     }
     
-    // 🎚️ Стартуємо завжди з USB: флешка має пріоритет. Раніше тут
-    // відновлювався External з NVS, і після перезавантаження плата
-    // мовчала, поки режим не перемкнуть вручну.
-    if (g_last_source_pref == 1) {
-        ESP_LOGI(TAG, "ℹ️ Останній режим був External — стартуємо з USB (пріоритет флешки)");
-        save_last_source_pref(0);
+    // 🎚️ Відновлюємо останній режим, який КОРИСТУВАЧ вибрав вручну
+    // (External або USB). Автоматичні перемикання в NVS не пишуться.
+    if (g_last_source_pref == 1 && !g_mode_external) {
+        ESP_LOGI(TAG, "🎚️ Відновлення режиму: External input");
+        if (start_external_input() == ESP_OK) {
+            g_mode_external = true;
+            ESP_LOGI(TAG, "✅ External input активовано на старті");
+        } else {
+            ESP_LOGW(TAG, "⚠️ Не вдалося запустити external input при старті");
+        }
     }
     
     // === КРИТЕРІЙ 11: Головний цикл обробки повідомлень - має бути один ===
@@ -1159,14 +1163,19 @@ if (g_board_handle) {
                     ESP_LOGI(TAG, "🔍 4. Створення плейлисту...");
                     create_playlist_from_usb();
 
-                    // Флешка має пріоритет: якщо вона змонтована — виходимо з External
-                    // і граємо з USB. Повернутися в External можна чипом у застосунку.
-                    if (g_mode_external) {
+                    /* Якщо External вибрано вручну (pref=1) — не перебиваємо:
+                       флешка монтується, але автозапуск з USB не робимо.
+                       Якщо pref=USB — виходимо з External і граємо з флешки. */
+                    if (g_mode_external && g_last_source_pref == 0) {
                         ESP_LOGI(TAG, "🔀 USB змонтовано — вимикаємо External, граємо з флешки");
                         stop_external_input();
                         g_mode_external = false;
                     }
-                    save_last_source_pref(0);
+                    if (g_mode_external) {
+                        ESP_LOGI(TAG, "ℹ️ External обрано вручну — USB без автозапуску");
+                        g_processing_connect = false;
+                        continue;
+                    }
                     
                     if (g_playlist_ready) {
                         ESP_LOGI(TAG, "✅ Плейлист створено: знайдено %d треків", g_playlist_size);
@@ -1497,11 +1506,12 @@ if (g_board_handle) {
                     g_skip_to_prev = false;
                     g_is_paused = false;
                     
-                    // 💾 Очищення збереженої позиції (флешка вилучена)
-                    ESP_LOGI(TAG, "   🗑️ Очищення збереженої позиції...");
-                    clear_playback_position();
-                    
-                    // 📊 Скидання позиційних змінних
+                    /* Позицію НЕ стираємо: саме вона потрібна, щоб після
+                       повторної вставки флешки продовжити з того ж місця.
+                       Раніше тут викликався clear_playback_position() — через
+                       це трек завжди починався з початку.
+                       У RAM прапори скидаємо; позицію перечитає обробник
+                       підключення (load_playback_position). */
                     g_last_saved_position = 0;
                     g_saved_track_index = -1;
                     g_saved_position_ms = 0;
