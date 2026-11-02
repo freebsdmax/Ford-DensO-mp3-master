@@ -1455,44 +1455,14 @@ void player_task(void *pvParam)
         g_stall_last_bytes = 0;
         g_stall_last_ts_ms = esp_timer_get_time() / 1000;
 
-        // Якщо після запуску пайплайну потрібно відновити позицію —
-        // попробуем поставить паузу, выполнить seek и затем возобновить,
-        // это часто помогает корректно пропустить начальные байты декодером.
-        if (g_restore_playback && g_current_track == g_saved_track_index && g_saved_position_ms > 0) {
-            ESP_LOGI(TAG_PIPE, "⏸️ Пауза пайплайна для установки позиції");
-            audio_pipeline_pause(pipeline);
-
-            audio_element_info_t info_seek = {0};
-            if (audio_element_getinfo(fatfs_stream_reader, &info_seek) == ESP_OK && info_seek.total_bytes > 0) {
-                size_t target_bytes = (size_t)((g_saved_position_ms * 16000) / 1000);
-                if (target_bytes > (size_t)(info_seek.total_bytes * 0.9)) {
-                    target_bytes = (size_t)(info_seek.total_bytes * 0.9);
-                }
-                ESP_LOGI(TAG_PIPE, "🌅 Встановлюємо позицію ПІСЛЯ запуску, до resume: %d байт", (int)target_bytes);
-                esp_err_t rseek = audio_element_set_byte_pos(fatfs_stream_reader, target_bytes);
-                if (rseek == ESP_OK) {
-                    vTaskDelay(pdMS_TO_TICKS(200));
-                    audio_element_info_t check = {0};
-                    if (audio_element_getinfo(fatfs_stream_reader, &check) == ESP_OK) {
-                        int actual_ms = (int)((check.byte_pos * 1000) / 16000);
-                        ESP_LOGI(TAG_PIPE, "✅ Позиція встановлена після pause: %d байт (~%d мс)", (int)check.byte_pos, actual_ms);
-                        g_last_saved_position = actual_ms;
-                    }
-                } else {
-                    ESP_LOGW(TAG_PIPE, "⚠️ Не вдалося встановити позицію після pause: %s", esp_err_to_name(rseek));
-                }
-            } else {
-                ESP_LOGW(TAG_PIPE, "⚠️ Інфо файлу недоступне після запуску пайплайна");
-            }
-
-            ESP_LOGI(TAG_PIPE, "▶️ Відновлюємо пайплайн після seek");
-            audio_pipeline_resume(pipeline);
-
-            // Сбросим флаги восстановления, чтобы не пытаться снова
-            g_restore_playback = false;
-            g_saved_track_index = -1;
-            g_saved_position_ms = 0;
-        }
+        /* Пауза/seek/resume після старту більше не використовується:
+           на ESP32-S3 i2s-елемент не встигав у RESUME (timeout 2 с) і
+           відтворення застрягало назавжди — саме через це не грало з флешки.
+           Позиція відновлюється ДО старту (audio_element_set_byte_pos вище);
+           якщо це не вдалося — трек грає з початку. */
+        g_restore_playback = false;
+        g_saved_track_index = -1;
+        g_saved_position_ms = 0;
 
         // ⏳ Чекаємо, поки пайплайн реально почне відтворювати
         ESP_LOGI(TAG_PIPE, "⏳ Очікування старту відтворення...");
@@ -1630,6 +1600,7 @@ void player_task(void *pvParam)
         bool playback_error = false;
         int timeout_counter = 0;
         const int MAX_TIMEOUT = 36000;
+        bool pause_applied = false;
         
         g_last_position_save_time = xTaskGetTickCount();
         
@@ -1656,11 +1627,16 @@ void player_task(void *pvParam)
                 }
             }
             
-            // ⏸️ Перевірка на паузу через веб
-            if (g_is_paused) {
-                audio_pipeline_pause(pipeline);
-            } else {
-                audio_pipeline_resume(pipeline);
+            // ⏸️ Перевірка на паузу через веб — реагуємо лише на ЗМІНУ стану.
+            // Раніше audio_pipeline_resume() викликався кожні 100 мс, елементи
+            // (особливо i2s) не встигали і ловили "RESUME timeout" — звук зникав.
+            if (g_is_paused != pause_applied) {
+                if (g_is_paused) {
+                    audio_pipeline_pause(pipeline);
+                } else {
+                    audio_pipeline_resume(pipeline);
+                }
+                pause_applied = g_is_paused;
             }
             
             // ✅ Файл прочитан полностью

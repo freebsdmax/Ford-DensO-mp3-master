@@ -163,18 +163,59 @@ static void usb_forget_devices(void)
     g_current_mount_slot = -1;
 }
 
+static const usb_host_config_t s_host_config = { .intr_flags = ESP_INTR_FLAG_LEVEL1 };
+static const msc_host_driver_config_t s_msc_config = {
+    .create_backround_task = true,
+    .task_priority = 5,
+    .stack_size = 4096,
+    .callback = msc_event_cb,
+};
+
+/*
+ * Безпечний перезапуск USB-стека.
+ *
+ * usb_host_uninstall() усередині робить ESP_ERROR_CHECK(hub_uninstall()) і
+ * викликає abort(), якщо кореневий порт ще живлений (тобто флешка ще висить
+ * на шині). Тому спочатку звільняємо ВСІ пристрої і чекаємо подію
+ * USB_HOST_LIB_EVENT_FLAGS_ALL_FREE — лише після неї uninstall безпечний.
+ */
+static esp_err_t usb_stack_restart(void)
+{
+    usb_forget_devices();
+    if (usb_host_device_free_all() != ESP_OK) {
+        ESP_LOGW(TAG_USB, "USB restart: free_all failed");
+        return ESP_FAIL;
+    }
+
+    bool all_free = false;
+    for (int i = 0; i < 40 && !all_free; i++) {
+        uint32_t flags = 0;
+        if (usb_host_lib_handle_events(pdMS_TO_TICKS(50), &flags) == ESP_OK &&
+            (flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE)) {
+            all_free = true;
+        }
+    }
+    if (!all_free) {
+        ESP_LOGW(TAG_USB, "USB restart: devices still attached, skipped");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = usb_host_uninstall();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG_USB, "USB restart: uninstall %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    err = usb_host_install(&s_host_config);
+    if (err == ESP_OK) err = msc_host_install(&s_msc_config);
+    ESP_LOGW(TAG_USB, "USB restart: %s", esp_err_to_name(err));
+    return err;
+}
+
 void usb_task(void *args)
 {
-    const usb_host_config_t host_config = { .intr_flags = ESP_INTR_FLAG_LEVEL1 };
-    ESP_ERROR_CHECK(usb_host_install(&host_config));
-
-    const msc_host_driver_config_t msc_config = {
-        .create_backround_task = true,
-        .task_priority = 5,
-        .stack_size = 4096,
-        .callback = msc_event_cb,
-    };
-    ESP_ERROR_CHECK(msc_host_install(&msc_config));
+    ESP_ERROR_CHECK(usb_host_install(&s_host_config));
+    ESP_ERROR_CHECK(msc_host_install(&s_msc_config));
 
     uint8_t signaled[8] = {0};
     int signaled_count = 0;
@@ -198,13 +239,7 @@ void usb_task(void *args)
                 continue;
             }
             ESP_LOGW(TAG_USB, "Manual USB stack re-init requested");
-            usb_forget_devices();
-            msc_host_uninstall();
-            usb_host_uninstall();
-            vTaskDelay(pdMS_TO_TICKS(500));
-            esp_err_t re = usb_host_install(&host_config);
-            if (re == ESP_OK) re = msc_host_install(&msc_config);
-            ESP_LOGW(TAG_USB, "Manual USB re-init result: %s", esp_err_to_name(re));
+            usb_stack_restart();
             signaled_count = 0;
             reinit_count = 0;
             scans = 0;
@@ -251,16 +286,8 @@ void usb_task(void *args)
             // did not re-enumerate. Re-initialise the whole USB stack once to
             // force a bus reset / re-enumeration.
             if (!usb_detected && num_dev == 0 && !g_usb_mounted && reinit_count < 3 && scans >= 6) {
-                ESP_LOGW(TAG_USB, "No USB device after boot, re-initialising USB stack");
-                usb_forget_devices();
-                msc_host_uninstall();
-                usb_host_uninstall();
-                vTaskDelay(pdMS_TO_TICKS(500));
-                esp_err_t re = usb_host_install(&host_config);
-                if (re == ESP_OK) {
-                    re = msc_host_install(&msc_config);
-                }
-                ESP_LOGW(TAG_USB, "USB stack re-init result: %s", esp_err_to_name(re));
+                ESP_LOGW(TAG_USB, "No USB device after boot, restarting USB stack");
+                usb_stack_restart();
                 reinit_count++;
                 signaled_count = 0;
                 scans = 0;

@@ -90,6 +90,10 @@ static int _vol_process(audio_element_handle_t self, char *in_buf, int in_len)
     int r = audio_element_input(self, in_buf, in_len);
     if (r > 0) {
         player_volume_apply_i16(in_buf, (size_t)r);
+        /* ADF не переписує буфер у вихід автоматично: елемент зобов'язаний
+           сам викликати audio_element_output(), інакше дані просто зникають
+           (саме через це не було звуку з USB). */
+        r = audio_element_output(self, in_buf, r);
     }
     return r;
 }
