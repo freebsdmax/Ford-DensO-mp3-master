@@ -16,7 +16,7 @@ static const char *TAG = "LogFile";
 static const char *PATH = "/storage/log.txt";
 static const char *PATH_OLD = "/storage/log.old";
 static const size_t MAX_FILE = 256 * 1024;
-static const uint32_t FLUSH_PERIOD_MS = 30000;
+static const uint32_t FLUSH_PERIOD_MS = 300000;
 
 extern size_t web_ota_logs_since(uint32_t *since, char *dst, size_t cap);
 

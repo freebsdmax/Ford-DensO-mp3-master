@@ -1615,8 +1615,7 @@ void player_task(void *pvParam)
                 g_last_saved_position = current_position;
                 
                 // Автосохранение каждые 60 секунд или при значительном изменении
-                if (current_time - g_last_position_save_time >= pdMS_TO_TICKS(POSITION_SAVE_INTERVAL_MS) ||
-                    abs(current_position - g_last_saved_position) >= MIN_POSITION_CHANGE_MS) {
+                if (current_time - g_last_position_save_time >= pdMS_TO_TICKS(POSITION_SAVE_INTERVAL_MS)) {
                     
                     save_playback_position(g_current_track, (int32_t)current_position);
                     g_last_position_save_time = current_time;

@@ -61,8 +61,8 @@ extern bool g_play_specific_track;
 extern bool g_restore_playback;
 extern size_t g_stall_last_bytes;
 extern uint32_t g_last_position_save_time;
-#define POSITION_SAVE_INTERVAL_MS 60000
-#define MIN_POSITION_CHANGE_MS 10000
+#define POSITION_SAVE_INTERVAL_MS 300000
+#define MIN_POSITION_CHANGE_MS 30000
 #define PLAYBACK_STALL_TIMEOUT_MS 8000
 extern int64_t g_stall_last_ts_ms;
 extern int32_t g_current_track_duration_ms;

@@ -108,7 +108,7 @@ audio_element_handle_t volume_stream_init(void)
     cfg.tag = "volume";
     cfg.task_stack = 3072;
     cfg.task_core = 1;              /* audio core */
-    cfg.out_rb_size = 4 * 1024;
+    cfg.out_rb_size = 8 * 1024;
     cfg.buffer_len = 1024;
 
     audio_element_handle_t el = audio_element_init(&cfg);

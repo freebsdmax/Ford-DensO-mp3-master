@@ -117,8 +117,8 @@ static const char *TAG = "Player";
 // NVS key for sniffer enabled flag
 #define NVS_KEY_UART_DATE   "uart_date"   // Версія UART - дата
 #define NVS_KEY_UART_TIME   "uart_time"   // Версія UART - час
-#define POSITION_SAVE_INTERVAL_MS 60000  // 🕒 Зберігати позицію кожні 60 секунд
-#define MIN_POSITION_CHANGE_MS 10000     // 📏 Мінімальна зміна позиції для збереження
+#define POSITION_SAVE_INTERVAL_MS 300000  // 🕒 Зберігати позицію кожні 60 секунд
+#define MIN_POSITION_CHANGE_MS 30000     // 📏 Мінімальна зміна позиції для збереження
 #define PLAYBACK_STALL_TIMEOUT_MS 8000   // ⏳ 8 сек без прогресу - перезапуск треку
 
 
