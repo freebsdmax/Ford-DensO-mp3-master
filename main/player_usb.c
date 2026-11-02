@@ -224,7 +224,6 @@ void usb_task(void *args)
     int reinit_count = 0;
     bool usb_detected = false;
     int last_num_dev = -1;
-    int boot_wait = 0;
 
     while (true) {
         uint32_t event_flags;
@@ -284,30 +283,16 @@ void usb_task(void *args)
             }
 
             // Nothing detected: the drive stayed powered across MCU reset and
-            // did not re-enumerate. Handled by the watchdog below.
-        }
-
-        /* Якщо після старту (у т.ч. після deep sleep) флешка так і не
-           змонтувалась — повністю перезапускаємо USB-стек. Стік може бути
-           живий (devices>0), але MSC-подія губиться, тому умову num_dev==0
-           більше не використовуємо. */
-        if (!g_usb_mounted && !g_mode_external) {
-            if (++boot_wait >= 40) {              // ~4 с (ітерація ~100 мс)
-                boot_wait = 0;
-                if (reinit_count < 5) {
-                    ESP_LOGW(TAG_USB, "USB not mounted after boot (devices=%d), restarting stack",
-                             last_num_dev);
-                    usb_stack_restart();
-                    reinit_count++;
-                    usb_detected = false;
-                    signaled_count = 0;
-                    scans = 0;
-                    scan_ticks = 0;
-                    last_num_dev = -1;
-                }
+            // did not re-enumerate. Re-initialise the whole USB stack once to
+            // force a bus reset / re-enumeration.
+            if (!usb_detected && num_dev == 0 && !g_usb_mounted && reinit_count < 3 && scans >= 6) {
+                ESP_LOGW(TAG_USB, "No USB device after boot, restarting USB stack");
+                usb_stack_restart();
+                reinit_count++;
+                signaled_count = 0;
+                scans = 0;
+                scan_ticks = 0;
             }
-        } else {
-            boot_wait = 0;
         }
     }
 
