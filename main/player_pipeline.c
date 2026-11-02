@@ -1638,11 +1638,10 @@ void player_task(void *pvParam)
                    У NVS пишемо ЛИШЕ на паузі, зміні треку та перед сном —
                    під час музики flash не чіпаємо взагалі, щоб не було «тиків». */
                 g_last_saved_position = current_position;
-                save_playback_position_rtc(g_current_track, (int32_t)current_position);
 
-                /* RTC на цій платі не переживає reset (EN скидає RTC-домен),
-                   тому раз на 20 с дублюємо позицію в NVS. Один запис ~10 мс
-                   повністю ховається у DMA-буфері (70 мс), «тиків» немає. */
+                /* Позиція зберігається в NVS раз на 20 с (RTC на цій платі
+                   не переживає reset). Один запис ~10 мс ховається у
+                   DMA-буфері (70 мс), тому «тиків» не чути. */
                 if (current_time - g_last_position_save_time >= pdMS_TO_TICKS(20000)) {
                     save_playback_position(g_current_track, (int32_t)current_position);
                     g_last_position_save_time = current_time;

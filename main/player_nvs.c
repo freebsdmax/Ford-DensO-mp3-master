@@ -125,35 +125,8 @@ esp_err_t save_playback_position(int32_t track_index, int32_t position_ms) {
     return err;
 }
 
-/* --- RTC-копія позиції: не торкається flash ---
-   RTC_NOINIT_ATTR, а не RTC_DATA_ATTR: .rtc.data переініціалізується при
-   КОЖНОМУ ресеті (навіть esp_restart / EN), через що позиція губилась.
-   .rtc.noinit переживає будь-який reset; валідність — за магією. */
-#define RTC_POS_MAGIC 0x504F5331u   /* "POS1" */
-RTC_NOINIT_ATTR static int32_t s_rtc_track;
-RTC_NOINIT_ATTR static int32_t s_rtc_pos_ms;
-RTC_NOINIT_ATTR static uint32_t s_rtc_magic;
-
-void save_playback_position_rtc(int32_t track_index, int32_t position_ms)
-{
-    if (track_index < 0 || position_ms < 0) return;
-    s_rtc_track = track_index;
-    s_rtc_pos_ms = position_ms;
-    s_rtc_magic = RTC_POS_MAGIC;
-}
-
 esp_err_t load_playback_position(int32_t *track_index, int32_t *position_ms)
 {
-    /* Після deep sleep RTC-значення свіжіші за NVS — беремо їх. */
-    if (s_rtc_magic == RTC_POS_MAGIC &&
-        s_rtc_track >= 0 && s_rtc_track < 100000 &&
-        s_rtc_pos_ms >= 0 && s_rtc_pos_ms <= 3600000) {
-        *track_index = s_rtc_track;
-        *position_ms = s_rtc_pos_ms;
-        ESP_LOGI(TAG_NVS, "RTC position: track=%d, pos=%d ms", (int)s_rtc_track, (int)s_rtc_pos_ms);
-        return ESP_OK;
-    }
-
     nvs_handle_t nvs_handle;
     esp_err_t err;
     
