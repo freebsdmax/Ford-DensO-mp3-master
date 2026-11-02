@@ -1473,14 +1473,10 @@ void player_task(void *pvParam)
         g_stall_last_bytes = 0;
         g_stall_last_ts_ms = esp_timer_get_time() / 1000;
 
-        /* Пауза/seek/resume після старту більше не використовується:
-           на ESP32-S3 i2s-елемент не встигав у RESUME (timeout 2 с) і
-           відтворення застрягало назавжди — саме через це не грало з флешки.
-           Позиція відновлюється ДО старту (audio_element_set_byte_pos вище);
-           якщо це не вдалося — трек грає з початку. */
-        g_restore_playback = false;
-        g_saved_track_index = -1;
-        g_saved_position_ms = 0;
+        /* Позицію відновлюємо ПІСЛЯ старту пайплайна (нижче, у блоці
+           playback_started): до старту fatfs ще не знає розміру файлу, тому
+           seek ДО запуску майже завжди пропускався. Прапори тут НЕ скидаємо,
+           інакше відновлення ніколи не виконується. */
 
         // ⏳ Чекаємо, поки пайплайн реально почне відтворювати
         ESP_LOGI(TAG_PIPE, "⏳ Очікування старту відтворення...");
@@ -1643,6 +1639,14 @@ void player_task(void *pvParam)
                    під час музики flash не чіпаємо взагалі, щоб не було «тиків». */
                 g_last_saved_position = current_position;
                 save_playback_position_rtc(g_current_track, (int32_t)current_position);
+
+                /* RTC на цій платі не переживає reset (EN скидає RTC-домен),
+                   тому раз на 20 с дублюємо позицію в NVS. Один запис ~10 мс
+                   повністю ховається у DMA-буфері (70 мс), «тиків» немає. */
+                if (current_time - g_last_position_save_time >= pdMS_TO_TICKS(20000)) {
+                    save_playback_position(g_current_track, (int32_t)current_position);
+                    g_last_position_save_time = current_time;
+                }
             }
             
             // ⏸️ Перевірка на паузу через веб — реагуємо лише на ЗМІНУ стану.
