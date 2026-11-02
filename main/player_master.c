@@ -1171,6 +1171,13 @@ if (g_board_handle) {
                     if (g_playlist_ready) {
                         ESP_LOGI(TAG, "✅ Плейлист створено: знайдено %d треків", g_playlist_size);
                         
+                        /* Перечитуємо позицію на КОЖНЕ підключення флешки: після
+                           витягування глобальні значення застарівають, і трек
+                           починався з початку. RTC тримає свіжу позицію. */
+                        load_playback_position(&g_saved_track_index, &g_saved_position_ms);
+                        ESP_LOGI(TAG, "💾 Позиція з пам'яті: трек %d, %d мс",
+                                 (int)g_saved_track_index, (int)g_saved_position_ms);
+
                         // 💾 Завантаження збереженої позиції
                         if (g_saved_track_index >= 0 && g_saved_track_index < g_playlist_size) {
                             g_current_track = g_saved_track_index;
