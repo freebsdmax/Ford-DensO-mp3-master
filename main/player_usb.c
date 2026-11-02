@@ -249,7 +249,10 @@ void usb_task(void *args)
         } else if (!g_mode_external && boot_ticks < 150) {
             if (++no_usb_ticks >= 30) {
                 no_usb_ticks = 0;
-                if (s_usb_retry_done == 0 && !ever_mounted) {
+                /* Ребут має сенс лише якщо флешка вже використовувалась
+                   (у NVS є збережений трек). Якщо її ніколи не було —
+                   просто чекаємо, без зайвих перезавантажень. */
+                if (s_usb_retry_done == 0 && !ever_mounted && g_saved_track_index >= 0) {
                     s_usb_retry_done = 1;
                     ESP_LOGW(TAG_USB, "USB flash not detected after 3 s - one automatic reboot");
                     vTaskDelay(pdMS_TO_TICKS(200));
