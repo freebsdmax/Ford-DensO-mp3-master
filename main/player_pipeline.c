@@ -877,6 +877,7 @@ void player_control(const char* cmd, int track) {
             send_i2c_command(UART_CMD_PAUSE);
         } else {
             g_is_paused = true;
+            save_playback_position(g_current_track, g_last_saved_position);
         }
         ESP_LOGI(TAG_PIPE, "🌐 Веб: пауза");
     } else if (strcmp(cmd, "next") == 0) {
@@ -1532,6 +1533,9 @@ void player_task(void *pvParam)
                 }
                 
                 // 🌅 СПРОБА ВІДНОВЛЕННЯ ПОЗИЦІЇ
+                ESP_LOGI(TAG_PIPE, "Restore check: restore=%d cur=%d saved=%d pos=%d",
+                         (int)g_restore_playback, (int)g_current_track,
+                         (int)g_saved_track_index, (int)g_saved_position_ms);
                 if (g_restore_playback && g_current_track == g_saved_track_index && g_saved_position_ms > 0) {
                     ESP_LOGI(TAG_PIPE, "");
                     ESP_LOGI(TAG_PIPE, "╔═══════════════════════════════════════════════╗");
