@@ -952,6 +952,44 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         return ble_rpc_return_json(root, response, response_size);
     }
 
+    if (strcmp(request_copy, "can.learn.start") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *act = j ? cJSON_GetObjectItemCaseSensitive(j, "action") : NULL;
+        const cJSON *sec = j ? cJSON_GetObjectItemCaseSensitive(j, "seconds") : NULL;
+        int action = cJSON_IsNumber(act) ? act->valueint : 0;
+        int seconds = cJSON_IsNumber(sec) ? sec->valueint : 12;
+        esp_err_t err = player_can_learn_start(action, seconds);
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddStringToObject(root, "error", err == ESP_OK ? "" : esp_err_to_name(err));
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "can.learn.status") == 0) {
+        int st = 0, act = 0, left = 0;
+        uint32_t id = 0;
+        uint8_t d1 = 0;
+        player_can_learn_status(&st, &act, &left, &id, &d1);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddNumberToObject(root, "state", st);
+        cJSON_AddNumberToObject(root, "action", act);
+        cJSON_AddNumberToObject(root, "secs_left", left);
+        cJSON_AddNumberToObject(root, "id", (double)id);
+        cJSON_AddNumberToObject(root, "data1", d1);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "can.learn.cancel") == 0) {
+        player_can_learn_cancel();
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", true);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
     if (strcmp(request_copy, "seek.get") == 0) {
         cJSON *root = cJSON_CreateObject();
         if (!root) return 0;

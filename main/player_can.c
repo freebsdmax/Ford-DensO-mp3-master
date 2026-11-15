@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <string.h>
+#include "esp_timer.h"
 
 /* "Can" tag: CAN frames must be filtered by the "Car" log group
    (CAN + ELM327), not by the player group. */
@@ -50,6 +51,112 @@ static void can_save_settings(void)
         nvs_set_u16(h, "can_deb", g_can_debounce_ms);
         nvs_commit(h);
         nvs_close(h);
+    }
+}
+
+/* ---------------- Навчання CAN-кнопок ---------------- */
+#define CAN_LEARN_BG_MAX 40
+
+static volatile int s_learn_state = 0;   /* 0 idle, 1 bg, 2 wait, 3 done, 4 fail */
+static volatile int s_learn_action = 0;
+static int64_t s_learn_deadline_us = 0;
+static int s_learn_wait_sec = 30;
+static int s_bg_count = 0;
+static struct { uint32_t id; uint8_t b1; } s_bg[CAN_LEARN_BG_MAX];
+static uint32_t s_learn_id = 0;
+static uint8_t s_learn_b1 = 0;
+
+static int learn_secs_left(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_learn_deadline_us <= now) return 0;
+    return (int)((s_learn_deadline_us - now) / 1000000LL);
+}
+
+esp_err_t player_can_learn_start(int action, int seconds)
+{
+    if (action < 0 || action > 2) return ESP_ERR_INVALID_ARG;
+    if (seconds < 5) seconds = 5;
+    if (seconds > 60) seconds = 60;
+
+    s_learn_action = action;
+    s_bg_count = 0;
+    s_learn_id = 0;
+    s_learn_b1 = 0;
+    s_learn_state = 1;
+    s_learn_deadline_us = esp_timer_get_time() + (int64_t)seconds * 1000000LL;
+    ESP_LOGI(TAG_CAN, "CAN learn: action=%d, фон %d с", action, seconds);
+    return ESP_OK;
+}
+
+void player_can_learn_cancel(void)
+{
+    if (s_learn_state == 1 || s_learn_state == 2) {
+        s_learn_state = 0;
+        ESP_LOGI(TAG_CAN, "CAN learn: скасовано");
+    }
+}
+
+void player_can_learn_status(int *state, int *action, int *secs_left,
+                             uint32_t *id, uint8_t *data1)
+{
+    if (state) *state = s_learn_state;
+    if (action) *action = s_learn_action;
+    if (secs_left) *secs_left = learn_secs_left();
+    if (id) *id = s_learn_id;
+    if (data1) *data1 = s_learn_b1;
+}
+
+/* Викликається з can_task кожні ~100 мс: перемикання фаз за таймером. */
+void player_can_learn_tick(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_learn_state == 1 && now >= s_learn_deadline_us) {
+        s_learn_state = 2;
+        s_learn_deadline_us = now + (int64_t)s_learn_wait_sec * 1000000LL;
+        ESP_LOGI(TAG_CAN, "CAN learn: фон %d кадрів, чекаю натискання (%d с)",
+                 s_bg_count, s_learn_wait_sec);
+    } else if (s_learn_state == 2 && now >= s_learn_deadline_us) {
+        s_learn_state = 4;
+        ESP_LOGW(TAG_CAN, "CAN learn: кадр не знайдено за %d с", s_learn_wait_sec);
+    }
+}
+
+static bool learn_is_new(const twai_message_t *m, uint8_t b1)
+{
+    for (int i = 0; i < s_bg_count; i++) {
+        if (s_bg[i].id == m->identifier && s_bg[i].b1 == b1) return false;
+    }
+    return true;
+}
+
+void player_can_learn_feed(const twai_message_t *m)
+{
+    if (m->data_length_code < 2) return;
+    uint8_t b1 = m->data[1] & 0xF0;
+
+    if (s_learn_state == 1) {
+        if (learn_is_new(m, b1) && s_bg_count < CAN_LEARN_BG_MAX) {
+            s_bg[s_bg_count].id = m->identifier;
+            s_bg[s_bg_count].b1 = b1;
+            s_bg_count++;
+        }
+        return;
+    }
+    if (s_learn_state != 2) return;
+    if (learn_is_new(m, b1)) {
+        s_learn_id = m->identifier;
+        s_learn_b1 = b1 ? b1 : m->data[1];
+
+        g_can_main_id = s_learn_id;
+        if (s_learn_action == 0) g_can_mask_next = s_learn_b1;
+        else if (s_learn_action == 1) g_can_mask_prev = s_learn_b1;
+        else g_can_mask_mode = s_learn_b1;
+        can_save_settings();
+
+        s_learn_state = 3;
+        ESP_LOGI(TAG_CAN, "CAN learn: OK — ID=0x%03X, data[1]=0x%02X (action %d)",
+                 (unsigned)s_learn_id, s_learn_b1, s_learn_action);
     }
 }
 
@@ -291,6 +398,12 @@ void process_can_message(twai_message_t *message)
         vTaskDelay(pdMS_TO_TICKS(CAN_WAKEUP_DELAY_MS));
     }
     
+    /* Режим навчання: кадри не виконуємо, лише аналізуємо. */
+    if (s_learn_state == 1 || s_learn_state == 2) {
+        player_can_learn_feed(message);
+        return;
+    }
+
     ESP_LOGI(TAG_CAN, "📨 CAN: Отримано повідомлення ID: 0x%03X, DLC: %d", 
              message->identifier, message->data_length_code);
     
@@ -435,14 +548,17 @@ void can_task(void *arg)
                          esp_err_to_name(wifi_ret));
             }
             
-            // 🎯 Обробляємо тільки якщо не в режимі сну або якщо це команда пробудження
-            if (!g_can_sleep_mode || 
+            // 🎯 Під час навчання обробляємо ВСІ кадри; інакше — як раніше
+            if (s_learn_state == 1 || s_learn_state == 2 ||
+                !g_can_sleep_mode ||
                 (message.identifier == g_can_main_id && message.data[0] == 0x01)) {
                 process_can_message(&message);
             }
         } else if (ret != ESP_ERR_TIMEOUT) {
             ESP_LOGE(TAG_CAN, "❌ CAN помилка отримання: %s", esp_err_to_name(ret));
         }
+
+        player_can_learn_tick();
         
         // 📨 Відправляти статус кожні 5 секунд (тільки якщо не спим)
         if (!g_can_sleep_mode) {

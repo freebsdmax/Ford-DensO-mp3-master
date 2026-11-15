@@ -638,6 +638,19 @@ static const char *INDEX_HTML =
 "    <input type='number' id='can-debounce' min='50' max='2000' value='500'><br><br>"
 "    <button class='btn' type='button' onclick='saveCanSettings()'>Зберегти</button>"
 "    <div id='can-status' style='margin-top:1rem;color:#06c;'></div>"
+"    <hr style='margin:1rem 0;'>"
+"    <label>🎓 Навчання кнопок: слухаємо шину, потім натисни кнопку в авто.</label><br>"
+"    <label>Слухати фон:</label>"
+"    <select id='can-learn-sec'>"
+"      <option value='10'>10 с</option>"
+"      <option value='15' selected>15 с</option>"
+"      <option value='20'>20 с</option>"
+"    </select><br><br>"
+"    <button class='btn' type='button' onclick='startCanLearn(0)'>⏭️ NEXT</button>"
+"    <button class='btn' type='button' onclick='startCanLearn(1)'>⏮️ PREV</button>"
+"    <button class='btn' type='button' onclick='startCanLearn(2)'>🔀 MODE</button>"
+"    <button class='btn btn-secondary' type='button' onclick='cancelCanLearn()'>Скасувати</button>"
+"    <div id='can-learn-status' style='margin-top:1rem;color:#06c;'></div>"
 "  </div>"
 "  <div class='section'>"
 "    <h3>⏩ Перемотка (Bluetooth)</h3>"
@@ -943,6 +956,37 @@ static const char *INDEX_HTML =
 "  fetch('/can_settings' + q).then(r=>r.json()).then(s=>{"
 "    document.getElementById('can-status').textContent = 'Збережено: ' + s.bitrate + ' кбіт/с, ID=0x' + s.id.toString(16).toUpperCase();"
 "  }).catch(e=>{document.getElementById('can-status').textContent = 'Помилка';});"
+"}"
+"let canLearnTimer = null;"
+"function startCanLearn(a){"
+"  const sec = document.getElementById('can-learn-sec').value;"
+"  fetch('/can_learn?action=' + a + '&sec=' + sec).then(r=>r.json()).then(s=>{"
+"    document.getElementById('can-learn-status').textContent = 'Слухаю шину...';"
+"    pollCanLearn();"
+"  }).catch(e=>{document.getElementById('can-learn-status').textContent = 'Помилка';});"
+"}"
+"function cancelCanLearn(){"
+"  fetch('/can_learn_cancel', {method:'POST'}).catch(()=>{});"
+"  if (canLearnTimer) { clearInterval(canLearnTimer); canLearnTimer = null; }"
+"  document.getElementById('can-learn-status').textContent = 'Скасовано';"
+"}"
+"function pollCanLearn(){"
+"  if (canLearnTimer) clearInterval(canLearnTimer);"
+"  canLearnTimer = setInterval(()=>{"
+"    fetch('/can_learn_status').then(r=>r.json()).then(s=>{"
+"      const el = document.getElementById('can-learn-status');"
+"      if (s.state === 1) el.textContent = 'Фон: залишилось ' + s.secs_left + ' с...';"
+"      else if (s.state === 2) el.textContent = 'Тепер натисни кнопку! ' + s.secs_left + ' с';"
+"      else if (s.state === 3) {"
+"        el.textContent = 'OK: ID=0x' + s.id.toString(16).toUpperCase() +"
+"          ', data[1]=0x' + s.data1.toString(16).toUpperCase();"
+"        clearInterval(canLearnTimer); canLearnTimer = null; loadCanSettings();"
+"      } else if (s.state === 4) {"
+"        el.textContent = 'Не знайдено — спробуй ще раз';"
+"        clearInterval(canLearnTimer); canLearnTimer = null;"
+"      }"
+"    }).catch(()=>{});"
+"  }, 500);"
 "}"
 "function loadSeekSettings(){"
 "  fetch('/seek_settings').then(r=>r.json()).then(s=>{"
@@ -1487,6 +1531,53 @@ static esp_err_t can_settings_handler(httpd_req_t *req)
              (unsigned)bitrate, (unsigned long)id, mn, mp, mm, (unsigned)debounce);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t can_learn_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+
+    int action = 0, sec = 12;
+    char buf[96];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(buf, "action", val, sizeof(val)) == ESP_OK) action = atoi(val);
+        if (httpd_query_key_value(buf, "sec", val, sizeof(val)) == ESP_OK) sec = atoi(val);
+    }
+    player_can_learn_start(action, sec);
+
+    int st = 0, act = 0, left = 0;
+    uint32_t id = 0;
+    uint8_t d1 = 0;
+    player_can_learn_status(&st, &act, &left, &id, &d1);
+    char resp[160];
+    snprintf(resp, sizeof(resp),
+             "{\"state\":%d,\"action\":%d,\"secs_left\":%d,\"id\":%lu,\"data1\":%u}",
+             st, act, left, (unsigned long)id, (unsigned)d1);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t can_learn_status_handler(httpd_req_t *req)
+{
+    int st = 0, act = 0, left = 0;
+    uint32_t id = 0;
+    uint8_t d1 = 0;
+    player_can_learn_status(&st, &act, &left, &id, &d1);
+    char resp[160];
+    snprintf(resp, sizeof(resp),
+             "{\"state\":%d,\"action\":%d,\"secs_left\":%d,\"id\":%lu,\"data1\":%u}",
+             st, act, left, (unsigned long)id, (unsigned)d1);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t can_learn_cancel_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    player_can_learn_cancel();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 static esp_err_t seek_settings_handler(httpd_req_t *req)
@@ -2525,6 +2616,27 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL
     };
 
+    httpd_uri_t can_learn = {
+        .uri = "/can_learn",
+        .method = HTTP_GET,
+        .handler = can_learn_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t can_learn_status = {
+        .uri = "/can_learn_status",
+        .method = HTTP_GET,
+        .handler = can_learn_status_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t can_learn_cancel = {
+        .uri = "/can_learn_cancel",
+        .method = HTTP_POST,
+        .handler = can_learn_cancel_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t can_settings = {
         .uri = "/can_settings",
         .method = HTTP_GET,
@@ -2648,6 +2760,9 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &player_status);
     httpd_register_uri_handler(s_server, &volume);
     httpd_register_uri_handler(s_server, &seek_settings);
+    httpd_register_uri_handler(s_server, &can_learn);
+    httpd_register_uri_handler(s_server, &can_learn_status);
+    httpd_register_uri_handler(s_server, &can_learn_cancel);
     httpd_register_uri_handler(s_server, &can_settings);
     httpd_register_uri_handler(s_server, &ble_settings);
     httpd_register_uri_handler(s_server, &logs_config);

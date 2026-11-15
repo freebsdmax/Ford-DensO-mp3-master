@@ -36,6 +36,21 @@ bool player_can_get_settings(uint16_t *bitrate, uint32_t *id,
                              uint8_t *mn, uint8_t *mp, uint8_t *mm, uint16_t *debounce);
 esp_err_t player_can_set_settings(uint16_t bitrate, uint32_t id,
                                   uint8_t mn, uint8_t mp, uint8_t mm, uint16_t debounce);
+
+/*
+ * Навчання CAN-кнопок.
+ *
+ * 1) action: 0 = NEXT, 1 = PREV, 2 = MODE.
+ * 2) Перші `seconds` секунд збираємо "фон" — усі (ID, старший нібл data[1]),
+ *    які постійно бігають по шині.
+ * 3) Далі чекаємо до 30 с на кадр, якого НЕ було у фоні — це і є натискання.
+ * 4) Знайдений ID і маска зберігаються в NVS (can_id / can_mn / can_mp / can_mm).
+ */
+esp_err_t player_can_learn_start(int action, int seconds);
+void player_can_learn_cancel(void);
+/* state: 0 idle, 1 background, 2 waiting, 3 done, 4 failed */
+void player_can_learn_status(int *state, int *action, int *secs_left,
+                             uint32_t *id, uint8_t *data1);
 void can_task(void *arg);
 void can_sleep_monitor_task(void *arg);
 void process_can_message(twai_message_t *message);
