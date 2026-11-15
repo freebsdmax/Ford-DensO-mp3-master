@@ -651,6 +651,9 @@ static const char *INDEX_HTML =
 "    <button class='btn' type='button' onclick='startCanLearn(2)'>🔀 MODE</button>"
 "    <button class='btn btn-secondary' type='button' onclick='cancelCanLearn()'>Скасувати</button>"
 "    <div id='can-learn-status' style='margin-top:1rem;color:#06c;'></div>"
+"    <div style='margin-top:1rem;'><b>Вивчені кнопки:</b></div>"
+"    <div id='can-keys-list' style='margin-top:0.5rem;font-size:0.9rem;'></div>"
+"    <button class='btn btn-secondary' type='button' onclick='clearCanKeys()'>Очистити всі</button>"
 "  </div>"
 "  <div class='section'>"
 "    <h3>⏩ Перемотка (Bluetooth)</h3>"
@@ -958,6 +961,26 @@ static const char *INDEX_HTML =
 "  }).catch(e=>{document.getElementById('can-status').textContent = 'Помилка';});"
 "}"
 "let canLearnTimer = null;"
+"const CAN_ACTION_NAMES = ['NEXT','PREV','MODE'];"
+"function loadCanKeys(){"
+"  fetch('/can_keys').then(r=>r.json()).then(s=>{"
+"    const box = document.getElementById('can-keys-list');"
+"    if (!s.keys || s.keys.length === 0) { box.textContent = '—'; return; }"
+"    box.innerHTML = s.keys.map((k,i)=>"
+"      '<div style=\\'display:flex;justify-content:space-between;padding:2px 0;\\'>' +"
+"      '<span>' + (CAN_ACTION_NAMES[k.action]||'?') + ': ID=0x' + k.id.toString(16).toUpperCase() +"
+"      (k.mask ? ', byte' + k.byte + '&0x' + k.mask.toString(16).toUpperCase() + '=0x' + k.value.toString(16).toUpperCase() : ' (за ID)') +"
+"      '</span>' +"
+"      '<a href=\\'#\\' onclick=\\'removeCanKey(' + i + ');return false;\\'>видалити</a></div>'"
+"    ).join('');"
+"  }).catch(e=>console.log('can keys load error',e));"
+"}"
+"function removeCanKey(i){"
+"  fetch('/can_keys_remove?index=' + i, {method:'POST'}).then(r=>r.json()).then(()=>loadCanKeys());"
+"}"
+"function clearCanKeys(){"
+"  fetch('/can_keys_clear', {method:'POST'}).then(r=>r.json()).then(()=>loadCanKeys());"
+"}"
 "function startCanLearn(a){"
 "  const sec = document.getElementById('can-learn-sec').value;"
 "  fetch('/can_learn?action=' + a + '&sec=' + sec).then(r=>r.json()).then(s=>{"
@@ -980,7 +1003,7 @@ static const char *INDEX_HTML =
 "      else if (s.state === 3) {"
 "        el.textContent = 'OK: ID=0x' + s.id.toString(16).toUpperCase() +"
 "          ', data[1]=0x' + s.data1.toString(16).toUpperCase();"
-"        clearInterval(canLearnTimer); canLearnTimer = null; loadCanSettings();"
+"        clearInterval(canLearnTimer); canLearnTimer = null; loadCanSettings(); loadCanKeys();"
 "      } else if (s.state === 4) {"
 "        el.textContent = 'Не знайдено — спробуй ще раз';"
 "        clearInterval(canLearnTimer); canLearnTimer = null;"
@@ -1570,6 +1593,45 @@ static esp_err_t can_learn_status_handler(httpd_req_t *req)
              st, act, left, (unsigned long)id, (unsigned)d1);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t can_keys_handler(httpd_req_t *req)
+{
+    can_binding_t keys[CAN_KEYS_MAX];
+    int n = player_can_keys_get(keys, CAN_KEYS_MAX);
+    char resp[2048];
+    int off = snprintf(resp, sizeof(resp), "{\"count\":%d,\"keys\":[", n);
+    for (int i = 0; i < n && off < (int)sizeof(resp) - 128; i++) {
+        off += snprintf(resp + off, sizeof(resp) - off,
+                        "%s{\"id\":%lu,\"byte\":%u,\"mask\":%u,\"value\":%u,\"action\":%u}",
+                        i ? "," : "", (unsigned long)keys[i].id,
+                        keys[i].byte, keys[i].mask, keys[i].value, keys[i].action);
+    }
+    snprintf(resp + off, sizeof(resp) - off, "]}");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t can_keys_remove_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    int index = -1;
+    char buf[64];
+    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char val[16];
+        if (httpd_query_key_value(buf, "index", val, sizeof(val)) == ESP_OK) index = atoi(val);
+    }
+    esp_err_t err = player_can_keys_remove(index);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, err == ESP_OK ? "{\"ok\":true}" : "{\"ok\":false}");
+}
+
+static esp_err_t can_keys_clear_handler(httpd_req_t *req)
+{
+    REQUIRE_AUTH(req);
+    player_can_keys_clear();
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 static esp_err_t can_learn_cancel_handler(httpd_req_t *req)
@@ -2616,6 +2678,27 @@ esp_err_t web_ota_start(void)
         .user_ctx = NULL
     };
 
+    httpd_uri_t can_keys = {
+        .uri = "/can_keys",
+        .method = HTTP_GET,
+        .handler = can_keys_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t can_keys_remove = {
+        .uri = "/can_keys_remove",
+        .method = HTTP_POST,
+        .handler = can_keys_remove_handler,
+        .user_ctx = NULL
+    };
+
+    httpd_uri_t can_keys_clear = {
+        .uri = "/can_keys_clear",
+        .method = HTTP_POST,
+        .handler = can_keys_clear_handler,
+        .user_ctx = NULL
+    };
+
     httpd_uri_t can_learn = {
         .uri = "/can_learn",
         .method = HTTP_GET,
@@ -2760,6 +2843,9 @@ esp_err_t web_ota_start(void)
     httpd_register_uri_handler(s_server, &player_status);
     httpd_register_uri_handler(s_server, &volume);
     httpd_register_uri_handler(s_server, &seek_settings);
+    httpd_register_uri_handler(s_server, &can_keys);
+    httpd_register_uri_handler(s_server, &can_keys_remove);
+    httpd_register_uri_handler(s_server, &can_keys_clear);
     httpd_register_uri_handler(s_server, &can_learn);
     httpd_register_uri_handler(s_server, &can_learn_status);
     httpd_register_uri_handler(s_server, &can_learn_cancel);

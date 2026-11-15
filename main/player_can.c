@@ -54,6 +54,74 @@ static void can_save_settings(void)
     }
 }
 
+/* ---------------- Таблиця CAN-кнопок (кілька на одну дію) ---------------- */
+static can_binding_t s_keys[CAN_KEYS_MAX];
+static int s_key_count = 0;
+
+static void can_keys_load(void)
+{
+    nvs_handle_t h;
+    s_key_count = 0;
+    if (nvs_open("audio_player", NVS_READONLY, &h) != ESP_OK) return;
+    size_t len = sizeof(s_keys);
+    if (nvs_get_blob(h, "can_keys", s_keys, &len) == ESP_OK) {
+        int n = (int)(len / sizeof(can_binding_t));
+        if (n > CAN_KEYS_MAX) n = CAN_KEYS_MAX;
+        s_key_count = n;
+    }
+    nvs_close(h);
+}
+
+static void can_keys_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_blob(h, "can_keys", s_keys, (size_t)s_key_count * sizeof(can_binding_t));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+int player_can_keys_get(can_binding_t *out, int max)
+{
+    int n = s_key_count < max ? s_key_count : max;
+    for (int i = 0; i < n; i++) out[i] = s_keys[i];
+    return n;
+}
+
+esp_err_t player_can_keys_add(const can_binding_t *b)
+{
+    if (!b) return ESP_ERR_INVALID_ARG;
+    for (int i = 0; i < s_key_count; i++) {
+        if (s_keys[i].id == b->id && s_keys[i].byte == b->byte &&
+            s_keys[i].mask == b->mask && s_keys[i].value == b->value &&
+            s_keys[i].action == b->action) {
+            return ESP_OK;   /* вже є */
+        }
+    }
+    if (s_key_count >= CAN_KEYS_MAX) return ESP_ERR_NO_MEM;
+    s_keys[s_key_count++] = *b;
+    can_keys_save();
+    ESP_LOGI(TAG_CAN, "CAN key added: ID=0x%03X byte=%d mask=0x%02X val=0x%02X act=%d (всього %d)",
+             (unsigned)b->id, b->byte, b->mask, b->value, b->action, s_key_count);
+    return ESP_OK;
+}
+
+esp_err_t player_can_keys_remove(int index)
+{
+    if (index < 0 || index >= s_key_count) return ESP_ERR_INVALID_ARG;
+    for (int i = index; i + 1 < s_key_count; i++) s_keys[i] = s_keys[i + 1];
+    s_key_count--;
+    can_keys_save();
+    return ESP_OK;
+}
+
+esp_err_t player_can_keys_clear(void)
+{
+    s_key_count = 0;
+    can_keys_save();
+    return ESP_OK;
+}
+
 /* ---------------- Навчання CAN-кнопок ---------------- */
 #define CAN_LEARN_BG_MAX 40
 
@@ -62,7 +130,7 @@ static volatile int s_learn_action = 0;
 static int64_t s_learn_deadline_us = 0;
 static int s_learn_wait_sec = 30;
 static int s_bg_count = 0;
-static struct { uint32_t id; uint8_t b1; } s_bg[CAN_LEARN_BG_MAX];
+static struct { uint32_t id; uint8_t dlc; uint8_t data[8]; } s_bg[CAN_LEARN_BG_MAX];
 static uint32_t s_learn_id = 0;
 static uint8_t s_learn_b1 = 0;
 
@@ -122,42 +190,66 @@ void player_can_learn_tick(void)
     }
 }
 
-static bool learn_is_new(const twai_message_t *m, uint8_t b1)
+static bool learn_is_new(const twai_message_t *m)
 {
     for (int i = 0; i < s_bg_count; i++) {
-        if (s_bg[i].id == m->identifier && s_bg[i].b1 == b1) return false;
+        if (s_bg[i].id != m->identifier) continue;
+        if (s_bg[i].dlc != m->data_length_code) continue;
+        bool same = true;
+        for (int k = 0; k < m->data_length_code && k < 8; k++) {
+            if (s_bg[i].data[k] != m->data[k]) { same = false; break; }
+        }
+        if (same) return false;
     }
     return true;
 }
 
 void player_can_learn_feed(const twai_message_t *m)
 {
-    if (m->data_length_code < 2) return;
-    uint8_t b1 = m->data[1] & 0xF0;
+    if (m->data_length_code < 1) return;
 
     if (s_learn_state == 1) {
-        if (learn_is_new(m, b1) && s_bg_count < CAN_LEARN_BG_MAX) {
+        if (learn_is_new(m) && s_bg_count < CAN_LEARN_BG_MAX) {
             s_bg[s_bg_count].id = m->identifier;
-            s_bg[s_bg_count].b1 = b1;
+            s_bg[s_bg_count].dlc = m->data_length_code;
+            memset(s_bg[s_bg_count].data, 0, sizeof(s_bg[0].data));
+            memcpy(s_bg[s_bg_count].data, m->data,
+                   m->data_length_code < 8 ? m->data_length_code : 8);
             s_bg_count++;
         }
         return;
     }
     if (s_learn_state != 2) return;
-    if (learn_is_new(m, b1)) {
-        s_learn_id = m->identifier;
-        s_learn_b1 = b1 ? b1 : m->data[1];
+    if (!learn_is_new(m)) return;
 
-        g_can_main_id = s_learn_id;
-        if (s_learn_action == 0) g_can_mask_next = s_learn_b1;
-        else if (s_learn_action == 1) g_can_mask_prev = s_learn_b1;
-        else g_can_mask_mode = s_learn_b1;
-        can_save_settings();
+    /* Кадр, якого не було у фоні. Визначаємо, чим він відрізняється. */
+    can_binding_t b = {0};
+    b.action = (uint8_t)s_learn_action;
+    b.id = m->identifier;
+    b.mask = 0;   /* за замовчуванням — збіг по ID */
 
-        s_learn_state = 3;
-        ESP_LOGI(TAG_CAN, "CAN learn: OK — ID=0x%03X, data[1]=0x%02X (action %d)",
-                 (unsigned)s_learn_id, s_learn_b1, s_learn_action);
+    int bg = -1;
+    for (int i = 0; i < s_bg_count; i++) {
+        if (s_bg[i].id == m->identifier) { bg = i; break; }
     }
+    if (bg >= 0) {
+        int len = m->data_length_code < 8 ? m->data_length_code : 8;
+        for (int k = 0; k < len; k++) {
+            if (s_bg[bg].data[k] != m->data[k]) {
+                b.byte = (uint8_t)k;
+                b.mask = 0xFF;
+                b.value = m->data[k];
+                break;
+            }
+        }
+    }
+
+    player_can_keys_add(&b);
+    s_learn_id = b.id;
+    s_learn_b1 = b.mask ? b.value : 0;
+    s_learn_state = 3;
+    ESP_LOGI(TAG_CAN, "CAN learn: OK — ID=0x%03X byte=%d mask=0x%02X val=0x%02X (action %d)",
+             (unsigned)b.id, b.byte, b.mask, b.value, b.action);
 }
 
 void player_can_load_settings(void)
@@ -183,6 +275,8 @@ void player_can_load_settings(void)
         }
         nvs_close(h);
     }
+    can_keys_load();
+
     ESP_LOGI(TAG_CAN, "CAN config: %u kbps, ID=0x%03X, masks 0x%02X/0x%02X/0x%02X, debounce %u ms",
              (unsigned)g_can_bitrate, (unsigned)g_can_main_id,
              g_can_mask_next, g_can_mask_prev, g_can_mask_mode, (unsigned)g_can_debounce_ms);
@@ -382,6 +476,52 @@ void wifi_can_on_control_callback(uint8_t cmd, const uint8_t *data, uint8_t len)
 }
 
 
+/* Виконання дії кнопки: 0=NEXT, 1=PREV, 2=MODE. */
+static void can_handle_action(int action, uint8_t cmd)
+{
+    app_message_t app_msg = {0};
+
+    if (action == 0) {
+        if (cmd == CMD_NEXT_TRACK) {
+            ESP_LOGI(TAG_CAN, "CAN: 0x49 (CMD_NEXT_TRACK) ігнорується");
+            return;
+        }
+        uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
+        if (now - g_last_next_command_time < g_can_debounce_ms) return;
+        g_last_next_command_time = now;
+        ESP_LOGI(TAG_CAN, "CAN: НАСТУПНИЙ ТРЕК (0x%02X)", cmd);
+        if (g_mode_external) {
+            send_i2c_command(LINK_CMD_NEXT_TRACK);
+        } else {
+            app_msg.id = APP_NEXT_TRACK;
+            xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+        }
+    } else if (action == 1) {
+        if (cmd == CMD_PREV_TRACK) {
+            ESP_LOGI(TAG_CAN, "CAN: 0x89 (CMD_PREV_TRACK) ігнорується");
+            return;
+        }
+        uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
+        if (now - g_last_prev_command_time < g_can_debounce_ms) return;
+        g_last_prev_command_time = now;
+        ESP_LOGI(TAG_CAN, "CAN: ПОПЕРЕДНІЙ ТРЕК (0x%02X)", cmd);
+        if (g_mode_external) {
+            send_i2c_command(LINK_CMD_PREV_TRACK);
+        } else {
+            app_msg.id = APP_PREV_TRACK;
+            xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+        }
+    } else if (action == 2) {
+        if (cmd == CMD_MODE_SWITCH) {
+            ESP_LOGI(TAG_CAN, "CAN: 0x19 (CMD_MODE_SWITCH) ігнорується");
+            return;
+        }
+        ESP_LOGI(TAG_CAN, "CAN: ПЕРЕМИКАННЯ РЕЖИМУ (0x%02X)", cmd);
+        app_msg.id = APP_MODE_SWITCH;
+        xQueueSend(app_queue, &app_msg, portMAX_DELAY);
+    }
+}
+
 void process_can_message(twai_message_t *message)
 {
     // ⏰ ОНОВЛЮЄМО час останньої активності
@@ -404,6 +544,21 @@ void process_can_message(twai_message_t *message)
         return;
     }
 
+    /* Вивчені кнопки: на одну дію може бути кілька прив'язок. */
+    for (int i = 0; i < s_key_count; i++) {
+        const can_binding_t *b = &s_keys[i];
+        if (message->identifier != b->id) continue;
+        if (b->mask == 0) {
+            can_handle_action(b->action, 0);
+            return;
+        }
+        if (b->byte < message->data_length_code &&
+            (message->data[b->byte] & b->mask) == b->value) {
+            can_handle_action(b->action, message->data[b->byte]);
+            return;
+        }
+    }
+
     ESP_LOGI(TAG_CAN, "📨 CAN: Отримано повідомлення ID: 0x%03X, DLC: %d", 
              message->identifier, message->data_length_code);
     
@@ -422,95 +577,9 @@ void process_can_message(twai_message_t *message)
         else if (cmd_masked == g_can_mask_prev) cmd_masked = 0x80;
         else if (cmd_masked == g_can_mask_mode) cmd_masked = 0x10;
         
-        switch (cmd_masked) {
-            case 0x40:  // NEXT_TRACK (0x4x, де x може бути будь-чим)
-                {
-                    // Исключаем CMD_NEXT_TRACK 0x49
-                    if (cmd == CMD_NEXT_TRACK) {
-                        ESP_LOGI(TAG_CAN, "⏭️ CAN: Команда 0x49 (CMD_NEXT_TRACK) ігнорується");
-                        break;
-                    }
-                    
-                    uint32_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
-                    uint32_t time_since_last = current_time - g_last_next_command_time;
-                    
-                    // Перевіряємо debounce - ігноруємо якщо команда прийшла занадто швидко
-                    if (time_since_last < g_can_debounce_ms) {
-                        ESP_LOGW(TAG_CAN, "⏭️ CAN: NEXT команда ігнорується (debounce: %lu мс < %d мс)", 
-                                time_since_last, g_can_debounce_ms);
-                        break;
-                    }
-                    
-                    g_last_next_command_time = current_time;
-                    ESP_LOGI(TAG_CAN, "⏭️ CAN: Команда НАСТУПНИЙ ТРЕК (0x%02X)", cmd);
-                    
-                    // Если в режиме external input - отправляем по UART на внешнее устройство
-                    if (g_mode_external) {
-                        ESP_LOGI(TAG_CAN, "🔀 Режим external - отправка по UART");
-                        if (send_i2c_command(LINK_CMD_NEXT_TRACK) != ESP_OK) {
-                            ESP_LOGW(TAG_CAN, "⚠️ UART: не вдалося відправити команду NEXT_TRACK");
-                        }
-                    } else {
-                        // Иначе - управляем локальным плеером
-                        app_msg.id = APP_NEXT_TRACK;
-                        xQueueSend(app_queue, &app_msg, portMAX_DELAY);
-                    }
-                }
-                break;
-                
-            case 0x80:  // PREV_TRACK (0x8x, де x може бути будь-чим)
-                {
-                    // Исключаем CMD_PREV_TRACK 0x89
-                    if (cmd == CMD_PREV_TRACK) {
-                        ESP_LOGI(TAG_CAN, "⏮️ CAN: Команда 0x89 (CMD_PREV_TRACK) ігнорується");
-                        break;
-                    }
-                    
-                    uint32_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
-                    uint32_t time_since_last = current_time - g_last_prev_command_time;
-                    
-                    // Перевіряємо debounce - ігноруємо якщо команда прийшла занадто швидко
-                    if (time_since_last < g_can_debounce_ms) {
-                        ESP_LOGW(TAG_CAN, "⏮️ CAN: PREV команда ігнорується (debounce: %lu мс < %d мс)", 
-                                time_since_last, g_can_debounce_ms);
-                        break;
-                    }
-                    
-                    g_last_prev_command_time = current_time;
-                    ESP_LOGI(TAG_CAN, "⏮️ CAN: Команда ПОПЕРЕДНІЙ ТРЕК (0x%02X)", cmd);
-                    
-                    // Если в режиме external input - отправляем по UART на внешнее устройство
-                    if (g_mode_external) {
-                        ESP_LOGI(TAG_CAN, "🔀 Режим external - отправка по UART");
-                        if (send_i2c_command(LINK_CMD_PREV_TRACK) != ESP_OK) {
-                            ESP_LOGW(TAG_CAN, "⚠️ UART: не вдалося відправити команду PREV_TRACK");
-                        }
-                    } else {
-                        // Иначе - управляем локальным плеером
-                        app_msg.id = APP_PREV_TRACK;
-                        xQueueSend(app_queue, &app_msg, portMAX_DELAY);
-                    }
-                }
-                break;
-                
-            case 0x10:  // MODE_SWITCH (0x1x, де x може бути будь-чим)
-                // Исключаем CMD_MODE_SWITCH 0x19
-                if (cmd == CMD_MODE_SWITCH) {
-                    ESP_LOGI(TAG_CAN, "🔄 CAN: Команда 0x19 (CMD_MODE_SWITCH) ігнорується");
-                    break;
-                }
-                
-                ESP_LOGI(TAG_CAN, "🔄 CAN: Команда ПЕРЕМИКАННЯ РЕЖИМУ (0x%02X)", cmd);
-                app_msg.id = APP_MODE_SWITCH;
-                xQueueSend(app_queue, &app_msg, portMAX_DELAY);
-                break;
-                
-            default:
-                //ESP_LOGW(TAG_CAN, "❓ CAN: Невідома команда: 0x%02X", cmd);
-                break;
-        }
-    } else {
-       // ESP_LOGW(TAG_CAN, "⚠️ CAN: Некоректне повідомлення або невірний формат");
+        if (cmd_masked == g_can_mask_next)      can_handle_action(0, cmd);
+        else if (cmd_masked == g_can_mask_prev) can_handle_action(1, cmd);
+        else if (cmd_masked == g_can_mask_mode) can_handle_action(2, cmd);
     }
 }
 

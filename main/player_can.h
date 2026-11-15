@@ -46,6 +46,21 @@ esp_err_t player_can_set_settings(uint16_t bitrate, uint32_t id,
  * 3) Далі чекаємо до 30 с на кадр, якого НЕ було у фоні — це і є натискання.
  * 4) Знайдений ID і маска зберігаються в NVS (can_id / can_mn / can_mp / can_mm).
  */
+typedef struct __attribute__((packed)) {
+    uint32_t id;      /* CAN ID */
+    uint8_t  byte;    /* індекс байта даних (0..7) */
+    uint8_t  mask;    /* 0 = достатньо збігу ID */
+    uint8_t  value;   /* (data[byte] & mask) == value */
+    uint8_t  action;  /* 0 = NEXT, 1 = PREV, 2 = MODE */
+} can_binding_t;
+
+#define CAN_KEYS_MAX 24
+
+int  player_can_keys_get(can_binding_t *out, int max);
+esp_err_t player_can_keys_add(const can_binding_t *b);
+esp_err_t player_can_keys_remove(int index);
+esp_err_t player_can_keys_clear(void);
+
 esp_err_t player_can_learn_start(int action, int seconds);
 void player_can_learn_cancel(void);
 /* state: 0 idle, 1 background, 2 waiting, 3 done, 4 failed */

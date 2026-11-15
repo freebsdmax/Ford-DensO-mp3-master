@@ -952,6 +952,47 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         return ble_rpc_return_json(root, response, response_size);
     }
 
+    if (strcmp(request_copy, "can.keys.get") == 0) {
+        can_binding_t keys[CAN_KEYS_MAX];
+        int n = player_can_keys_get(keys, CAN_KEYS_MAX);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON *arr = cJSON_AddArrayToObject(root, "keys");
+        for (int i = 0; i < n; i++) {
+            cJSON *k = cJSON_CreateObject();
+            if (!k) continue;
+            cJSON_AddNumberToObject(k, "id", (double)keys[i].id);
+            cJSON_AddNumberToObject(k, "byte", keys[i].byte);
+            cJSON_AddNumberToObject(k, "mask", keys[i].mask);
+            cJSON_AddNumberToObject(k, "value", keys[i].value);
+            cJSON_AddNumberToObject(k, "action", keys[i].action);
+            cJSON_AddItemToArray(arr, k);
+        }
+        cJSON_AddNumberToObject(root, "count", n);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "can.keys.remove") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *ix = j ? cJSON_GetObjectItemCaseSensitive(j, "index") : NULL;
+        esp_err_t err = cJSON_IsNumber(ix) ? player_can_keys_remove(ix->valueint)
+                                           : ESP_ERR_INVALID_ARG;
+        if (j) cJSON_Delete(j);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddStringToObject(root, "error", err == ESP_OK ? "" : esp_err_to_name(err));
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "can.keys.clear") == 0) {
+        player_can_keys_clear();
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", true);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
     if (strcmp(request_copy, "can.learn.start") == 0 && payload) {
         cJSON *j = cJSON_Parse(payload);
         const cJSON *act = j ? cJSON_GetObjectItemCaseSensitive(j, "action") : NULL;
