@@ -116,7 +116,7 @@ jobs:
             echo "## Прошивка"
             echo '```bash'
             echo "esptool.py --chip esp32s3 -p /dev/ttyUSB0 -b 921600 write_flash 0x0 Ford-DensO-mp3-master-full.bin"
-            echo '\`\`\`'
+            echo '```'
             echo ""
             echo "> Повний образ затирає NVS (налаштування). OTA через застосунок/веб — не затирає."
           } > RELEASE_NOTES.md
