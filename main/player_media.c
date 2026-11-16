@@ -197,6 +197,61 @@ bool player_media_seek_to(uint32_t target_ms)
     return player_media_seek_by(delta);
 }
 
+/* ---------------- autoplay on the slave ---------------- */
+
+static volatile bool s_autoplay_slave = true;
+
+void player_autoplay_load(void)
+{
+    nvs_handle_t h;
+    uint8_t v = 1;
+    if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, "autoplay_slave", &v) != ESP_OK) v = 1;
+        nvs_close(h);
+    }
+    s_autoplay_slave = (v != 0);
+    ESP_LOGI(TAG, "Autoplay on slave: %s", s_autoplay_slave ? "on" : "off");
+}
+
+bool player_autoplay_slave(void)
+{
+    return s_autoplay_slave;
+}
+
+bool player_autoplay_set(bool enabled)
+{
+    s_autoplay_slave = enabled;
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "autoplay_slave", enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG, "Autoplay on slave set: %s", enabled ? "on" : "off");
+    return player_autoplay_sync_slave();
+}
+
+bool player_autoplay_sync_slave(void)
+{
+    if (uart_link_ota_active()) return false;
+    if (!uart_link_lock(500)) return false;
+
+    uint8_t pkt[3] = {
+        UART_CMD_PREFIX_NORMAL,
+        UART_CMD_SET_AUTOPLAY,
+        (uint8_t)(s_autoplay_slave ? 1 : 0)
+    };
+    int w = uart_write_bytes(MASTER_UART_PORT, (const char *)pkt, sizeof(pkt));
+    uart_link_unlock();
+
+    if (w != (int)sizeof(pkt)) {
+        ESP_LOGW(TAG, "autoplay config not sent (%d bytes)", w);
+        return false;
+    }
+    ESP_LOGI(TAG, "autoplay config sent to slave: %d", (int)s_autoplay_slave);
+    return true;
+}
+
 /* ---------------- seek configuration ---------------- */
 
 static volatile uint8_t s_seek_step_s = 10;

@@ -673,12 +673,13 @@ char* get_player_status_json(void) {
     snprintf(json, 512,
              "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,"
              "\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s,"
-             "\"autoplay_enabled\":%s,"
+             "\"autoplay_enabled\":%s,\"autoplay_slave\":%s,"
              "\"media_valid\":%s,\"media_playing\":%s,\"media_pos\":%lu,\"media_dur\":%lu,"
              "\"media_title\":\"%s\",\"media_artist\":\"%s\",\"volume\":%d}",
              g_current_track, position_out, duration_ms, paused_out ? "true" : "false",
              g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false",
              player_ble_autoplay() ? "true" : "false",
+             player_autoplay_slave() ? "true" : "false",
              media.valid ? "true" : "false", media.playing ? "true" : "false",
              (unsigned long)media.pos_ms, (unsigned long)media.dur_ms,
              mtitle, martist, player_volume_get());
@@ -1039,12 +1040,14 @@ if (g_board_handle) {
     player_auth_load();
     player_volume_load();
     player_seek_load();
+    player_autoplay_load();
     player_audio_cfg_load();
     player_net_load();
     player_media_start();
     player_logfile_start();
     /* Slave does not keep this in NVS - push it after the UART is ready. */
     player_seek_sync_slave();
+    player_autoplay_sync_slave();
     player_storage_init();
         if (i2c_err != ESP_OK) {
             ESP_LOGW(TAG, "⚠️ UART master ініціалізовано неуспішно: %s", esp_err_to_name(i2c_err));

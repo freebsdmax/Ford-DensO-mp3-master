@@ -98,10 +98,14 @@ jobs:
       - name: Build release notes
         run: |
           PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          NOTES="release-notes/${GITHUB_REF_NAME}.md"
           {
             echo "## Що змінилось"
             echo ""
-            if [ -n "$PREV" ]; then
+            if [ -f "$NOTES" ]; then
+              # Український список змін, підготовлений вручну для цього тегу
+              cat "$NOTES"
+            elif [ -n "$PREV" ]; then
               git log --pretty=format:"- %s (\`%h\`)" "$PREV".."${GITHUB_REF_NAME}"
             else
               git log --pretty=format:"- %s (\`%h\`)" -20

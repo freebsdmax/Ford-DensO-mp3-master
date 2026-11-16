@@ -28,6 +28,12 @@ bool player_media_seek_to(uint32_t target_ms);
 /** Forward a relative seek (positive/negative milliseconds). */
 bool player_media_seek_by(int32_t delta_ms);
 
+/** Автопрогравання на Slave при підключенні телефона по Bluetooth. */
+bool player_autoplay_slave(void);
+void player_autoplay_load(void);
+bool player_autoplay_set(bool enabled);
+bool player_autoplay_sync_slave(void);
+
 /** Налаштування перемотки (зберігаються в NVS, дублюються на Slave). */
 uint8_t player_seek_step_s(void);      /* 5..30 */
 uint8_t player_seek_mode(void);        /* 0 = натискання, 1 = утримання */

@@ -20,7 +20,10 @@ static const uint32_t FLUSH_PERIOD_MS = 300000;
 
 extern size_t web_ota_logs_since(uint32_t *since, char *dst, size_t cap);
 
-static volatile bool s_enabled = true;
+/* Типово ВИМКНЕНО: файл /storage/log.txt пишеться лише після явного
+   увімкнення в застосунку або веб-інтерфейсі. RAM-буфер для вкладки «Логи»
+   працює завжди — він нічого не пише у flash. */
+static volatile bool s_enabled = false;
 static uint32_t s_since = 0;
 
 bool player_logfile_enabled(void)
@@ -44,7 +47,7 @@ static void logfile_load(void)
 {
     nvs_handle_t h;
     if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
-        uint8_t v = 1;
+        uint8_t v = 0;
         if (nvs_get_u8(h, "log_persist", &v) == ESP_OK) {
             s_enabled = (v != 0);
         }

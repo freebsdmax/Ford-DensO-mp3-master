@@ -327,21 +327,33 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         cJSON *root = cJSON_CreateObject();
         if (!root) return 0;
         cJSON_AddBoolToObject(root, "enabled", s_autoplay_ble);
+        cJSON_AddBoolToObject(root, "slave", player_autoplay_slave());
         return ble_rpc_return_json(root, response, response_size);
     }
 
     if (strcmp(request_copy, "autoplay.set") == 0 && payload) {
         cJSON *j = cJSON_Parse(payload);
         const cJSON *en = j ? cJSON_GetObjectItemCaseSensitive(j, "enabled") : NULL;
+        const cJSON *sl = j ? cJSON_GetObjectItemCaseSensitive(j, "slave") : NULL;
         bool on = s_autoplay_ble;
+        bool slave_on = player_autoplay_slave();
         if (cJSON_IsBool(en)) on = cJSON_IsTrue(en);
         else if (cJSON_IsNumber(en)) on = en->valueint != 0;
+        if (cJSON_IsBool(sl)) slave_on = cJSON_IsTrue(sl);
+        else if (cJSON_IsNumber(sl)) slave_on = sl->valueint != 0;
         if (j) cJSON_Delete(j);
-        player_ble_set_autoplay(on);
+
+        if (on != s_autoplay_ble) player_ble_set_autoplay(on);
+        bool ok = true;
+        if (slave_on != player_autoplay_slave()) {
+            ok = player_autoplay_set(slave_on);
+        }
+
         cJSON *root = cJSON_CreateObject();
         if (!root) return 0;
-        cJSON_AddBoolToObject(root, "success", true);
+        cJSON_AddBoolToObject(root, "success", ok);
         cJSON_AddBoolToObject(root, "enabled", s_autoplay_ble);
+        cJSON_AddBoolToObject(root, "slave", player_autoplay_slave());
         return ble_rpc_return_json(root, response, response_size);
     }
 

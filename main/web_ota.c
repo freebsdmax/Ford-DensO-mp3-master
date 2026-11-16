@@ -534,7 +534,15 @@ static const char *INDEX_HTML =
 "        <span class='slider'></span>"
 "      </label>"
 "    </div>"
-"    <div style='color:#666;'>Коли телефон підключається по Bluetooth до плати, програвання стартує автоматично (USB-трек або AVRCP-play на телефоні в режимі External).</div>"
+"    <div style='color:#666;'>Коли застосунок підключається до плати по BLE, програвання стартує автоматично (USB-трек або AVRCP-play на телефоні в режимі External).</div>"
+"    <div style='display:flex; align-items:center; justify-content:space-between; margin-top:1rem;'>"
+"      <h4 style='margin:0;'>🎵 Автопрогравання на Bluetooth-модулі (Slave)</h4>"
+"      <label class='switch'>"
+"        <input type='checkbox' id='autoplay-slave'>"
+"        <span class='slider'></span>"
+"      </label>"
+"    </div>"
+"    <div style='color:#666;'>Коли телефон підключається до Bluetooth-модуля, модуль сам надсилає AVRCP-play — музика стартує без участі застосунку.</div>"
 "  </div>"
 "  <div class='section'><h3>ℹ️ Інформація про версії</h3>"
 "    <div id='version-info' style='background:#f5f5f5; padding:1rem; border-radius:4px; margin-top:1rem;'>"
@@ -762,6 +770,11 @@ static const char *INDEX_HTML =
 "    document.getElementById('player-status').textContent=t;"
 "  }).catch(e=>{console.log('Error sending command:',e);});"
 "}"
+"function setAutoplaySlaveState(state){"
+"  fetch('/player_cmd?cmd=set_autoplay_slave&track='+state).then(r=>r.text()).then(t=>{"
+"    document.getElementById('player-status').textContent=t;"
+"  }).catch(e=>{console.log('Error setting slave autoplay:',e);});"
+"}"
 "function setAutoplayState(state){"
 "  fetch('/player_cmd?cmd=set_autoplay&track='+state).then(r=>r.text()).then(t=>{"
 "    document.getElementById('player-status').textContent=t;"
@@ -776,7 +789,9 @@ static const char *INDEX_HTML =
 "  var sn = document.getElementById('sniffer-enabled');" 
 "  if (sn) sn.addEventListener('change', function(e){ setSnifferState(e.target.checked?1:0); });"
 "  var ap = document.getElementById('autoplay-enabled');"
-"  if (ap) ap.addEventListener('change', function(e){ setAutoplayState(e.target.checked?1:0); });" 
+"  if (ap) ap.addEventListener('change', function(e){ setAutoplayState(e.target.checked?1:0); });"
+"  var aps = document.getElementById('autoplay-slave');"
+"  if (aps) aps.addEventListener('change', function(e){ setAutoplaySlaveState(e.target.checked?1:0); });" 
 "});" 
 "let lastStatus = null;"
 "const volumeEl = document.getElementById('volume');"
@@ -844,7 +859,8 @@ static const char *INDEX_HTML =
 "      }"
 "    }" 
 "    try { var sn = document.getElementById('sniffer-enabled'); if (sn) sn.checked = !!s.sniffer_enabled; } catch(e){}"
-"    try { var ap = document.getElementById('autoplay-enabled'); if (ap) ap.checked = !!s.autoplay_enabled; } catch(e){}" 
+"    try { var ap = document.getElementById('autoplay-enabled'); if (ap) ap.checked = !!s.autoplay_enabled; } catch(e){}"
+"    try { var aps = document.getElementById('autoplay-slave'); if (aps) aps.checked = !!s.autoplay_slave; } catch(e){}" 
 "    try { if (volumeEl && document.activeElement !== volumeEl && typeof s.volume === 'number') { volumeEl.value = s.volume; document.getElementById('volume-label').textContent = s.volume + '%'; } } catch(e){}"
 "  }).catch(e=>{console.log('Error updating status:',e);});"
 "}"
@@ -1400,6 +1416,8 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
         player_set_position(pos);
     } else if (strcmp(cmd, "set_autoplay") == 0) {
         player_ble_set_autoplay(track != 0);
+    } else if (strcmp(cmd, "set_autoplay_slave") == 0) {
+        player_autoplay_set(track != 0);
     } else {
         player_control(cmd, track);
     }

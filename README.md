@@ -64,9 +64,11 @@
 | `seek_step` / `seek_mode` | крок перемотки (5–30 с) / метод (0=натискання, 1=утримання) | 10 / 0 |
 | `can_bitrate`, `can_id`, `can_mn`, `can_mp`, `can_mm`, `can_deb` | CAN-шина | 125, 0x2D5, 0x40, 0x80, 0x10, 500 |
 | `audio_profile` | 0=низька затримка, 1=збалансований, 2=стійкий | 1 |
-| `log_buf_kb` / `log_persist` | розмір буфера логів / «чорна скринька» | 4 / 1 |
+| `log_buf_kb` / `log_persist` | розмір буфера логів / запис у файл («чорна скринька») | 4 / **0** |
 | `ble_name` | ім'я пристрою по BLE | `Ford Player` |
 | `net_wifi` / `net_web` | Wi-Fi (AP/STA) / веб-інтерфейс увімкнено | 1 / 1 |
+| `autoplay_ble` | автопрогравання при підключенні застосунку (BLE) | 0 |
+| `autoplay_slave` | автопрогравання на Slave при підключенні телефона | 1 |
 | `auth_token` | токен HTTP/OTA (порожній = вимкнено) | — |
 | `net_static`, `net_ip`, `net_gw`, `net_mask`, `net_dns1`, `net_dns2` | статична IP для STA | DHCP |
 | `track_index`, `position_ms`, `save_time_ms` | останній трек і позиція (продовження з місця) | — |
