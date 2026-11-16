@@ -639,7 +639,7 @@ static const char *INDEX_HTML =
 "    <button class='btn' type='button' onclick='saveCanSettings()'>Зберегти</button>"
 "    <div id='can-status' style='margin-top:1rem;color:#06c;'></div>"
 "    <hr style='margin:1rem 0;'>"
-"    <label>🎓 Навчання кнопок: слухаємо шину, потім натисни кнопку в авто.</label><br>"
+"    <label>🎓 Навчання кнопок: слухаємо шину, потім натисни й утримуй кнопку ~1 с.</label><br>"
 "    <label>Слухати фон:</label>"
 "    <select id='can-learn-sec'>"
 "      <option value='10'>10 с</option>"

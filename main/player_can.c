@@ -134,6 +134,20 @@ static struct { uint32_t id; uint8_t dlc; uint8_t data[8]; } s_bg[CAN_LEARN_BG_M
 static uint32_t s_learn_id = 0;
 static uint8_t s_learn_b1 = 0;
 
+/* Кандидат на кнопку: кадр, що відрізняється від фону.
+   Приймаємо його лише після ПІДТВЕРДЖЕННЯ — повтору (утримання) або
+   повернення до фонового значення (відпускання). Так випадковий рідкісний
+   кадр (двері, оберти) не буде призначено кнопці. */
+static bool s_cand_valid = false;
+static uint32_t s_cand_id = 0;
+static uint8_t s_cand_byte = 0;
+static uint8_t s_cand_value = 0;
+static uint8_t s_cand_hits = 0;
+
+/* Кадр із новим ID приймаємо лише після 3 появ. */
+static uint32_t s_new_id = 0;
+static uint8_t s_new_id_hits = 0;
+
 static int learn_secs_left(void)
 {
     int64_t now = esp_timer_get_time();
@@ -151,6 +165,10 @@ esp_err_t player_can_learn_start(int action, int seconds)
     s_bg_count = 0;
     s_learn_id = 0;
     s_learn_b1 = 0;
+    s_cand_valid = false;
+    s_cand_hits = 0;
+    s_new_id = 0;
+    s_new_id_hits = 0;
     s_learn_state = 1;
     s_learn_deadline_us = esp_timer_get_time() + (int64_t)seconds * 1000000LL;
     ESP_LOGI(TAG_CAN, "CAN learn: action=%d, фон %d с", action, seconds);
@@ -182,7 +200,7 @@ void player_can_learn_tick(void)
     if (s_learn_state == 1 && now >= s_learn_deadline_us) {
         s_learn_state = 2;
         s_learn_deadline_us = now + (int64_t)s_learn_wait_sec * 1000000LL;
-        ESP_LOGI(TAG_CAN, "CAN learn: фон %d кадрів, чекаю натискання (%d с)",
+        ESP_LOGI(TAG_CAN, "CAN learn: фон %d кадрів, натисни й утримуй кнопку ~1 с (%d с)",
                  s_bg_count, s_learn_wait_sec);
     } else if (s_learn_state == 2 && now >= s_learn_deadline_us) {
         s_learn_state = 4;
@@ -204,6 +222,30 @@ static bool learn_is_new(const twai_message_t *m)
     return true;
 }
 
+static void learn_accept(uint32_t id, uint8_t byte, uint8_t value)
+{
+    can_binding_t b = {0};
+    b.action = (uint8_t)s_learn_action;
+    b.id = id;
+    b.byte = byte;
+    b.mask = 0;
+    b.value = 0;
+    if (byte != 0xFF) {
+        b.mask = 0xFF;
+    } else {
+        b.byte = 0;
+        b.mask = 0;      /* збіг по ID */
+    }
+    b.value = value;
+
+    player_can_keys_add(&b);
+    s_learn_id = b.id;
+    s_learn_b1 = b.mask ? b.value : 0;
+    s_learn_state = 3;
+    ESP_LOGI(TAG_CAN, "CAN learn: OK — ID=0x%03X byte=%d mask=0x%02X val=0x%02X (action %d)",
+             (unsigned)b.id, b.byte, b.mask, b.value, b.action);
+}
+
 void player_can_learn_feed(const twai_message_t *m)
 {
     if (m->data_length_code < 1) return;
@@ -220,36 +262,56 @@ void player_can_learn_feed(const twai_message_t *m)
         return;
     }
     if (s_learn_state != 2) return;
-    if (!learn_is_new(m)) return;
 
-    /* Кадр, якого не було у фоні. Визначаємо, чим він відрізняється. */
-    can_binding_t b = {0};
-    b.action = (uint8_t)s_learn_action;
-    b.id = m->identifier;
-    b.mask = 0;   /* за замовчуванням — збіг по ID */
-
+    /* Шукаємо фоновий кадр з тим самим ID. */
     int bg = -1;
     for (int i = 0; i < s_bg_count; i++) {
         if (s_bg[i].id == m->identifier) { bg = i; break; }
     }
-    if (bg >= 0) {
-        int len = m->data_length_code < 8 ? m->data_length_code : 8;
-        for (int k = 0; k < len; k++) {
-            if (s_bg[bg].data[k] != m->data[k]) {
-                b.byte = (uint8_t)k;
-                b.mask = 0xFF;
-                b.value = m->data[k];
-                break;
+
+    if (bg < 0) {
+        /* Новий ID: приймаємо лише після 3 появ (випадковий кадр відсіється). */
+        if (s_new_id == m->identifier) {
+            if (++s_new_id_hits >= 3) {
+                learn_accept(m->identifier, 0xFF, 0);   /* прив'язка по ID */
             }
+        } else {
+            s_new_id = m->identifier;
+            s_new_id_hits = 1;
         }
+        return;
     }
 
-    player_can_keys_add(&b);
-    s_learn_id = b.id;
-    s_learn_b1 = b.mask ? b.value : 0;
-    s_learn_state = 3;
-    ESP_LOGI(TAG_CAN, "CAN learn: OK — ID=0x%03X byte=%d mask=0x%02X val=0x%02X (action %d)",
-             (unsigned)b.id, b.byte, b.mask, b.value, b.action);
+    int len = m->data_length_code < 8 ? m->data_length_code : 8;
+    int diff = -1;
+    for (int k = 0; k < len; k++) {
+        if (s_bg[bg].data[k] != m->data[k]) { diff = k; break; }
+    }
+
+    if (diff < 0) {
+        /* Кадр повернувся до фонового значення — це відпускання кнопки.
+           Якщо перед цим був відмінний кадр — підтверджуємо його. */
+        if (s_cand_valid && s_cand_id == m->identifier) {
+            learn_accept(s_cand_id, s_cand_byte, s_cand_value);
+        }
+        return;
+    }
+
+    uint8_t v = m->data[diff];
+
+    if (s_cand_valid && s_cand_id == m->identifier &&
+        s_cand_byte == (uint8_t)diff && s_cand_value == v) {
+        if (++s_cand_hits >= 2) {
+            /* Утримання кнопки: кадр повторився — підтверджено. */
+            learn_accept(s_cand_id, s_cand_byte, s_cand_value);
+        }
+    } else {
+        s_cand_valid = true;
+        s_cand_id = m->identifier;
+        s_cand_byte = (uint8_t)diff;
+        s_cand_value = v;
+        s_cand_hits = 1;
+    }
 }
 
 void player_can_load_settings(void)
