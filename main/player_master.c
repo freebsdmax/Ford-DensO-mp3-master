@@ -692,6 +692,89 @@ char* get_player_status_json(void) {
  * @brief Callback для обработки команд управления из Wi-Fi
  */
 
+/* ---------------- Мережа: Wi-Fi та веб-інтерфейс ---------------- */
+
+static bool s_net_wifi_on = true;   /* збережений стан: Wi-Fi */
+static bool s_net_web_on  = true;   /* збережений стан: веб-інтерфейс */
+
+/** Підняти Wi-Fi (AP/STA) + CAN-сніфер, якщо він увімкнений. */
+esp_err_t player_wifi_stack_start(void)
+{
+    int sniffer = 0;
+    load_sniffer_enabled(&sniffer);
+    if (sniffer) {
+        wifi_can_sniffer_config_t wifi_can_config = {
+            .wifi_ssid = WIFI_SSID,
+            .wifi_password = WIFI_PASSWORD,
+            .pc_ip_str = PC_IP_ADDR,
+            .udp_port = UDP_PORT,
+            .on_can_message = wifi_can_on_message_callback,
+            .on_control_command = wifi_can_on_control_callback,
+        };
+        esp_err_t err = wifi_can_sniffer_init(&wifi_can_config);
+        if (err == ESP_OK) {
+            g_sniffer_enabled = true;
+        } else {
+            ESP_LOGW(TAG, "⚠️ sniffer init failed: %s", esp_err_to_name(err));
+        }
+    }
+    return try_wifi_connection_with_fallback();
+}
+
+/** Погасити сніфер і Wi-Fi (радіо вимикається повністю). */
+static void player_wifi_stack_stop(void)
+{
+    wifi_can_sniffer_deinit();
+    g_sniffer_enabled = false;
+
+    esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
+    }
+    err = esp_wifi_deinit();
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "esp_wifi_deinit: %s", esp_err_to_name(err));
+    }
+    ESP_LOGI(TAG, "📴 Wi-Fi вимкнено");
+}
+
+void player_net_get_enabled(bool *wifi_on, bool *web_on)
+{
+    if (wifi_on) *wifi_on = s_net_wifi_on;
+    if (web_on) *web_on = s_net_web_on;
+}
+
+esp_err_t player_net_set_enabled(bool wifi_on, bool web_on)
+{
+    if (web_on != s_net_web_on) {
+        if (web_on) {
+            web_ota_start();
+        } else {
+            web_ota_stop();
+        }
+        s_net_web_on = web_on;
+        save_net_web_enabled(web_on);
+        ESP_LOGI(TAG, "🌐 Веб-інтерфейс: %s", web_on ? "увімкнено" : "вимкнено");
+    }
+
+    if (wifi_on != s_net_wifi_on) {
+        esp_err_t err = ESP_OK;
+        if (wifi_on) {
+            err = player_wifi_stack_start();
+            if (s_net_web_on) web_ota_start();
+        } else {
+            /* Без мережі веб-сервер недоступний — гасимо його, налаштування
+               лишається збереженим і сервер підніметься разом з Wi-Fi. */
+            web_ota_stop();
+            player_wifi_stack_stop();
+        }
+        s_net_wifi_on = wifi_on;
+        save_net_wifi_enabled(wifi_on);
+        return err;
+    }
+    return ESP_OK;
+}
+
 void app_main(void)
 {
 #ifdef CONFIG_FATFS_MAX_LFN
@@ -1029,10 +1112,18 @@ if (g_board_handle) {
         ESP_LOGI(TAG, "✅ Обробник кнопки BOOT (GPIO%d) встановлено", APP_QUIT_PIN);
     }
     
+    // 📡 Мережа: збережені перемикачі Wi-Fi та веб-інтерфейсу
+    int net_wifi = 1, net_web = 1;
+    load_net_wifi_enabled(&net_wifi);
+    load_net_web_enabled(&net_web);
+    s_net_wifi_on = net_wifi != 0;
+    s_net_web_on = net_web != 0;
+    ESP_LOGI(TAG, "🌐 Мережа: wifi=%d web=%d", (int)s_net_wifi_on, (int)s_net_web_on);
+
     // 📡 Wi‑Fi CAN-Sniffer: load saved enabled flag from NVS
     int saved = 0;
     load_sniffer_enabled(&saved);
-    if (saved) {
+    if (s_net_wifi_on && saved) {
         ESP_LOGI(TAG, "📡 Wi-Fi CAN-Sniffer saved state = ENABLED — starting at boot");
         wifi_can_sniffer_config_t wifi_can_config = {
             .wifi_ssid = WIFI_SSID,
@@ -1049,19 +1140,27 @@ if (g_board_handle) {
         } else {
             ESP_LOGW(TAG, "⚠️ Failed to init sniffer at boot: %s", esp_err_to_name(wifi_can_err));
         }
+    } else if (!s_net_wifi_on) {
+        ESP_LOGW(TAG, "📴 Wi-Fi вимкнено в налаштуваннях — AP/STA не запускаються");
     } else {
         ESP_LOGI(TAG, "📡 Wi-Fi CAN-Sniffer is DISABLED by default. Use web UI to enable.");
     }
 
-    // Запускаємо веб-OTA незалежно від стану сніфера
-    if (web_ota_start() == ESP_OK) {
-        ESP_LOGI(TAG, "🌐 Web OTA доступен: http://192.168.4.1/");
+    // Веб-інтерфейс: лише якщо увімкнений у налаштуваннях
+    if (s_net_web_on) {
+        if (web_ota_start() == ESP_OK) {
+            ESP_LOGI(TAG, "🌐 Web OTA доступен: http://192.168.4.1/");
+        } else {
+            ESP_LOGW(TAG, "⚠️ Web OTA не запустился");
+        }
     } else {
-        ESP_LOGW(TAG, "⚠️ Web OTA не запустился");
+        ESP_LOGW(TAG, "🌐 Веб-інтерфейс вимкнено в налаштуваннях");
     }
 
-    // Спробувати Wi-Fi підключення з fallback (AP/STA) — робимо це завжди
-    try_wifi_connection_with_fallback();
+    // Спробувати Wi-Fi підключення з fallback (AP/STA) — якщо Wi-Fi увімкнено
+    if (s_net_wifi_on) {
+        try_wifi_connection_with_fallback();
+    }
 
     // Встановити рівень логів для WiFiCanSniffer (буде використаний, коли сніфер запуститься)
     esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);

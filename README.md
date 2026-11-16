@@ -65,7 +65,8 @@
 | `can_bitrate`, `can_id`, `can_mn`, `can_mp`, `can_mm`, `can_deb` | CAN-шина | 125, 0x2D5, 0x40, 0x80, 0x10, 500 |
 | `audio_profile` | 0=низька затримка, 1=збалансований, 2=стійкий | 1 |
 | `log_buf_kb` / `log_persist` | розмір буфера логів / «чорна скринька» | 4 / 1 |
-| `ble_name` | ім'я пристрою по BLE | `ESP32_MP3_Player` |
+| `ble_name` | ім'я пристрою по BLE | `Ford Player` |
+| `net_wifi` / `net_web` | Wi-Fi (AP/STA) / веб-інтерфейс увімкнено | 1 / 1 |
 | `auth_token` | токен HTTP/OTA (порожній = вимкнено) | — |
 | `net_static`, `net_ip`, `net_gw`, `net_mask`, `net_dns1`, `net_dns2` | статична IP для STA | DHCP |
 | `track_index`, `position_ms`, `save_time_ms` | останній трек і позиція (продовження з місця) | — |
@@ -103,7 +104,7 @@
 | ota_0 | app | 0x320000 | 3 МБ | слот A |
 | ota_1 | app | 0x620000 | 3 МБ | слот B |
 | storage | data/fat | 0x920000 | 5.1 МБ | FAT-розділ |
-| **staging** | data/0x40 | 0xE00000 | 2 МБ | буфер OTA (образ перед застосуванням) |
+| **staging** | data/0x40 | 0xE00000 | 2 МБ | буфер OTA (копія образу перед застосуванням) |
 
 > ⚠️ `staging` — **нестандартний** розділ. Після зміни таблиці розділів потрібне
 > **повне прошивання по USB**. OTA таблицю розділів не оновлює.
@@ -248,6 +249,11 @@ esptool --chip esp32s3 merge_bin -o build/Ford-DensO-mp3-master-full.bin `
 1. **BLE → Master**: образ у PSRAM → `staging` → `esp_ota_*` → reboot.
 2. **BLE → Slave**: образ у PSRAM → `staging` → UART-протокол (блоки по 240 Б з ACK).
 3. **HTTP → Master/Slave**: те саме через веб-форму.
+
+> Перед UART-передачею master вичитує чергу slave і повторює `START` до 3 разів:
+> поки образ пишеться в `staging` (кілька секунд), slave міг застрягти на
+> відправці статусу і пропустити першу команду. Тепер прошивка проходить з
+> першого натискання.
 
 Прогрес і ETA рахуються в застосунку; застосунок також показує причину збою
 (`invalid firmware`, `incomplete upload`, `base64`, `MTU`, …).

@@ -24,6 +24,8 @@ extern int32_t g_saved_position_ms;
 #define NVS_KEY_AP_SSID    "ap_ssid"
 #define NVS_KEY_AP_PASS    "ap_pass"
 #define NVS_KEY_SNIFFER_ENABLED "sniffer_enabled"
+#define NVS_KEY_NET_WIFI   "net_wifi"
+#define NVS_KEY_NET_WEB    "net_web"
 #define NVS_KEY_PLAYER_DATE "player_date"
 #define NVS_KEY_PLAYER_TIME "player_time"
 #define WIFI_AP_SSID     "ESP32-MusicPlayer"
@@ -35,6 +37,10 @@ esp_err_t save_wifi_mode_pref(int mode);
 esp_err_t load_wifi_mode_pref(int *mode);
 esp_err_t save_sniffer_enabled(int enabled);
 esp_err_t load_sniffer_enabled(int *enabled);
+esp_err_t save_net_wifi_enabled(int enabled);
+esp_err_t load_net_wifi_enabled(int *enabled);
+esp_err_t save_net_web_enabled(int enabled);
+esp_err_t load_net_web_enabled(int *enabled);
 esp_err_t save_last_source_pref(int source);
 esp_err_t load_last_source_pref(int *source);
 esp_err_t save_sta_credentials(const char *ssid, const char *password);

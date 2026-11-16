@@ -8,6 +8,7 @@
 #include <string.h>
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "esp_timer.h"
 
 static const char *TAG = "UART_OTA_MASTER";
 
@@ -162,9 +163,25 @@ static esp_err_t receive_response(ota_response_t *resp, uint32_t timeout_ms)
 }
 
 /**
- * Відправити START команду
+ * Читає й викидає все, що slave встиг надіслати за [ms] мілісекунд.
+ *
+ * Поки master пише образ у flash (staging, FAT), він майже не вичитує UART.
+ * У slave маленький TX-буфер, тому його задача зависає на uart_write_bytes і
+ * перестає читати вхідні команди — саме через це перший START іноді губився.
  */
-static esp_err_t send_start_command(uint32_t total_size, uint32_t crc32)
+void uart_ota_drain_rx(uint32_t ms)
+{
+    uint8_t trash[64];
+    int64_t deadline = esp_timer_get_time() + (int64_t)ms * 1000;
+    do {
+        uart_read_bytes(MASTER_UART_PORT, trash, sizeof(trash), pdMS_TO_TICKS(20));
+    } while (esp_timer_get_time() < deadline);
+}
+
+/**
+ * Одна спроба START: надіслати пакет і дочекатись READY.
+ */
+static esp_err_t send_start_once(uint32_t total_size, uint32_t crc32, uint32_t wait_ms)
 {
     ota_start_packet_t pkt = {
         .prefix = UART_CMD_PREFIX_OTA,
@@ -172,38 +189,64 @@ static esp_err_t send_start_command(uint32_t total_size, uint32_t crc32)
         .total_size = total_size,
         .crc32 = crc32
     };
-    
-    ESP_LOGI(TAG, "📤 Відправка START: size=%u, crc=0x%08X (packet size=%d)", 
+
+    ESP_LOGI(TAG, "📤 Відправка START: size=%u, crc=0x%08X (packet size=%d)",
              total_size, crc32, sizeof(pkt));
-    
+
     esp_err_t ret = send_packet(&pkt, sizeof(pkt));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "❌ Помилка відправки START пакету");
         return ret;
     }
-    
+
     ESP_LOGI(TAG, "✅ START пакет відправлено, очікування READY...");
-    vTaskDelay(pdMS_TO_TICKS(50));  // Зменшено з 100мс
-    
-    // Очікуємо READY (даємо більше часу для ініціалізації OTA)
+    vTaskDelay(pdMS_TO_TICKS(50));
+
     ota_response_t resp;
-    ret = receive_response(&resp, UART_OTA_TIMEOUT_MS * 3);  // Зменшено до 3 секунд
+    ret = receive_response(&resp, wait_ms);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "❌ Timeout очікування READY");
-        ESP_LOGI(TAG, "🔍 Можливі причини: slave не ініціалізований, UART проблеми, або slave зайнятий");
         return ret;
     }
-    
-    ESP_LOGI(TAG, "📥 Отримано відповідь: 0x%02X (block_num=%d)", 
+
+    ESP_LOGI(TAG, "📥 Отримано відповідь: 0x%02X (block_num=%d)",
              resp.response, resp.block_num);
-    
+
     if (resp.response != OTA_RESP_READY) {
         ESP_LOGE(TAG, "❌ Slave не готовий: response=0x%02X", resp.response);
         return ESP_FAIL;
     }
-    
+
     ESP_LOGI(TAG, "✅ Slave готовий до OTA");
     return ESP_OK;
+}
+
+/**
+ * Відправити START з кількома спробами.
+ *
+ * Перша спроба інколи не доходить: slave ще не дочитав свою чергу (статуси,
+ * медіа) і фізично не бачить команду. Повтор робить прошивку надійною з
+ * першого натискання в застосунку.
+ */
+static esp_err_t send_start_command(uint32_t total_size, uint32_t crc32)
+{
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        if (attempt > 1) {
+            ESP_LOGW(TAG, "🔄 START: спроба %d/3", attempt);
+            uart_ota_drain_rx(300);
+            uart_flush(MASTER_UART_PORT);
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+
+        esp_err_t ret = send_start_once(total_size, crc32, UART_OTA_TIMEOUT_MS * 5u);
+        if (ret == ESP_OK) {
+            return ESP_OK;
+        }
+    }
+
+    ESP_LOGE(TAG, "❌ START не вдався після 3 спроб");
+    ESP_LOGI(TAG, "🔍 Можливі причини: slave не ініціалізований, UART проблеми, або slave зайнятий");
+    return ESP_ERR_TIMEOUT;
 }
 
 /**
@@ -325,10 +368,15 @@ static esp_err_t uart_ota_send_firmware_locked(const uint8_t *firmware_data, siz
     uart_write_bytes(MASTER_UART_PORT, wake_bytes, sizeof(wake_bytes));
     vTaskDelay(pdMS_TO_TICKS(100));
     uart_flush(MASTER_UART_PORT);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
+
     ESP_LOGI(TAG, "📤 Відправка пробних байтів для ініціалізації slave...");
-    
+
+    // Slave міг застрягти на відправці статусу, поки master писав образ у
+    // flash. Вичитуємо його чергу, щоб UART-задача slave знову читала вхід.
+    ESP_LOGI(TAG, "🧽 Вичитування черги slave перед START...");
+    uart_ota_drain_rx(800);
+    uart_flush(MASTER_UART_PORT);
+
     // Додаткова затримка для ініціалізації UART task на slave
     ESP_LOGI(TAG, "⏳ Waiting 1 second for slave UART task initialization...");
     vTaskDelay(pdMS_TO_TICKS(1000));

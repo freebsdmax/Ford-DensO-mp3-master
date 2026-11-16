@@ -98,6 +98,12 @@ static void apply_task(void *arg)
                     if (err != ESP_OK) break;
                     off += n;
                     s_applied = off;
+                    /* Flash-операції вимикають кеш і блокують друге ядро.
+                       Без паузи idle-задача (вона ж task_wdt) не отримує CPU:
+                       у логах з'являвся "task_wdt triggered". Заодно ці паузи
+                       дають задачі UART дочитувати відповіді slave, поки ми
+                       пишемо образ у staging. */
+                    if ((off & 0x3FFF) == 0) vTaskDelay(1);
                 }
                 heap_caps_free(block);
             }

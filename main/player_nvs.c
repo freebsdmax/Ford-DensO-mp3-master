@@ -287,6 +287,59 @@ esp_err_t load_sniffer_enabled(int *enabled)
     return err;
 }
 
+static esp_err_t save_flag_1def(const char *key, const char *log_tag, int enabled)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) return err;
+    err = nvs_set_i32(nvs_handle, key, enabled ? 1 : 0);
+    if (err == ESP_OK) err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) ESP_LOGI(TAG_NVS, "💾 Збережено %s=%d", log_tag, enabled ? 1 : 0);
+    return err;
+}
+
+static esp_err_t load_flag_1def(const char *key, const char *log_tag, int *enabled)
+{
+    if (!enabled) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) { *enabled = 1; return err; }
+    int32_t val = 1;
+    err = nvs_get_i32(nvs_handle, key, &val);
+    nvs_close(nvs_handle);
+    if (err == ESP_OK) {
+        *enabled = (val != 0) ? 1 : 0;
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *enabled = 1;   // типово увімкнено
+        err = ESP_OK;
+    } else {
+        *enabled = 1;
+    }
+    ESP_LOGI(TAG_NVS, "📥 Завантажено %s=%d", log_tag, *enabled);
+    return err;
+}
+
+esp_err_t save_net_wifi_enabled(int enabled)
+{
+    return save_flag_1def(NVS_KEY_NET_WIFI, "net_wifi", enabled);
+}
+
+esp_err_t load_net_wifi_enabled(int *enabled)
+{
+    return load_flag_1def(NVS_KEY_NET_WIFI, "net_wifi", enabled);
+}
+
+esp_err_t save_net_web_enabled(int enabled)
+{
+    return save_flag_1def(NVS_KEY_NET_WEB, "net_web", enabled);
+}
+
+esp_err_t load_net_web_enabled(int *enabled)
+{
+    return load_flag_1def(NVS_KEY_NET_WEB, "net_web", enabled);
+}
+
 esp_err_t save_last_source_pref(int source)
 {
     nvs_handle_t nvs_handle;

@@ -16,6 +16,7 @@
 #include "player_logfile.h"
 #include "player_audio_cfg.h"
 #include "player_net.h"
+#include "player_wifi.h"
 #include "nvs.h"
 #include "app_messages.h"
 #include "cJSON.h"
@@ -189,15 +190,25 @@ bool ble_file_ota_frame(uint32_t offset, const uint8_t *data, size_t len)
     return file_ota_write_at((size_t)offset, data, len) == ESP_OK;
 }
 
-static char s_ble_name[32] = "ESP32_MP3_Player";
+static esp_err_t player_ble_save_name(const char *name);
+
+#define BLE_DEFAULT_NAME       "Ford Player"
+#define BLE_LEGACY_DEFAULT_NAME "ESP32_MP3_Player"
+
+static char s_ble_name[32] = BLE_DEFAULT_NAME;
 
 void player_ble_load_settings(void)
 {
     nvs_handle_t h;
     if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
         size_t len = sizeof(s_ble_name);
-        if (nvs_get_str(h, "ble_name", s_ble_name, &len) != ESP_OK) {
-            strlcpy(s_ble_name, "ESP32_MP3_Player", sizeof(s_ble_name));
+        if (nvs_get_str(h, "ble_name", s_ble_name, &len) != ESP_OK ||
+            s_ble_name[0] == '\0') {
+            strlcpy(s_ble_name, BLE_DEFAULT_NAME, sizeof(s_ble_name));
+        } else if (strcmp(s_ble_name, BLE_LEGACY_DEFAULT_NAME) == 0) {
+            /* Стара типова назва — міграція на нову без скидання NVS. */
+            strlcpy(s_ble_name, BLE_DEFAULT_NAME, sizeof(s_ble_name));
+            player_ble_save_name(s_ble_name);
         }
         nvs_close(h);
     }
@@ -252,6 +263,39 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
             return 1;
         }
         return length;
+    }
+
+    if (strcmp(request_copy, "net.get") == 0) {
+        bool wifi_on = true, web_on = true;
+        player_net_get_enabled(&wifi_on, &web_on);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "wifi", wifi_on);
+        cJSON_AddBoolToObject(root, "web", web_on);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "net.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *w = j ? cJSON_GetObjectItemCaseSensitive(j, "wifi") : NULL;
+        const cJSON *e = j ? cJSON_GetObjectItemCaseSensitive(j, "web") : NULL;
+        bool wifi_on = true, web_on = true;
+        player_net_get_enabled(&wifi_on, &web_on);
+        if (cJSON_IsBool(w)) wifi_on = cJSON_IsTrue(w);
+        else if (cJSON_IsNumber(w)) wifi_on = w->valueint != 0;
+        if (cJSON_IsBool(e)) web_on = cJSON_IsTrue(e);
+        else if (cJSON_IsNumber(e)) web_on = e->valueint != 0;
+        if (j) cJSON_Delete(j);
+
+        esp_err_t err = player_net_set_enabled(wifi_on, web_on);
+        player_net_get_enabled(&wifi_on, &web_on);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", err == ESP_OK);
+        cJSON_AddStringToObject(root, "error", err == ESP_OK ? "" : esp_err_to_name(err));
+        cJSON_AddBoolToObject(root, "wifi", wifi_on);
+        cJSON_AddBoolToObject(root, "web", web_on);
+        return ble_rpc_return_json(root, response, response_size);
     }
 
     if (strcmp(request_copy, "wifi.get") == 0) {
