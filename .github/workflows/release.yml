@@ -87,27 +87,41 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
 
+      - name: Build release notes
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          {
+            echo "## Що змінилось"
+            echo ""
+            if [ -n "$PREV" ]; then
+              git log --pretty=format:"- %s (\`%h\`)" "$PREV".."${GITHUB_REF_NAME}"
+            else
+              git log --pretty=format:"- %s (\`%h\`)" -20
+            fi
+            echo ""
+            echo ""
+            echo "## Файли"
+            echo "- \`Ford-DensO-mp3-master-full.bin\` — повний образ (flash на \`0x0\`)"
+            echo "- \`Ford-DensO-mp3-master.bin\` — образ для OTA (застосунок / веб)"
+            echo "- \`bootloader.bin\`, \`partition-table.bin\`, \`ota_data_initial.bin\` — для ручного прошивання"
+            echo ""
+            echo "## Прошивка"
+            echo '\`\`\`bash'
+            echo "esptool.py --chip esp32s3 -p /dev/ttyUSB0 -b 921600 write_flash 0x0 Ford-DensO-mp3-master-full.bin"
+            echo '\`\`\`'
+            echo ""
+            echo "> Повний образ затирає NVS (налаштування). OTA через застосунок/веб — не затирає."
+          } > RELEASE_NOTES.md
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/**/*
-          generate_release_notes: true
-          body: |
-            Ford Player — Master firmware (ESP32-S3)
-
-            **Files**
-            - `Ford-DensO-mp3-master-full.bin` — single image, flash at `0x0`
-            - `Ford-DensO-mp3-master.bin` — app image for OTA (app / BLE)
-            - `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` — for manual flashing
-
-            **Flash**
-            ```bash
-            esptool.py --chip esp32s3 -p /dev/ttyUSB0 -b 921600 write_flash 0x0 Ford-DensO-mp3-master-full.bin
-            ```
-            or
-            ```bash
-            idf.py -p /dev/ttyUSB0 flash
-            ```
+          body_path: RELEASE_NOTES.md
