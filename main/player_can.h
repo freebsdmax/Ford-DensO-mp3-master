@@ -63,6 +63,7 @@ esp_err_t player_can_keys_clear(void);
 
 esp_err_t player_can_learn_start(int action, int seconds);
 void player_can_learn_cancel(void);
+int  player_can_learn_bg_count(void);
 /* state: 0 idle, 1 background, 2 waiting, 3 done, 4 failed */
 void player_can_learn_status(int *state, int *action, int *secs_left,
                              uint32_t *id, uint8_t *data1);

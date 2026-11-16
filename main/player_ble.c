@@ -1020,6 +1020,7 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
         cJSON_AddNumberToObject(root, "secs_left", left);
         cJSON_AddNumberToObject(root, "id", (double)id);
         cJSON_AddNumberToObject(root, "data1", d1);
+        cJSON_AddNumberToObject(root, "bg", player_can_learn_bg_count());
         return ble_rpc_return_json(root, response, response_size);
     }
 

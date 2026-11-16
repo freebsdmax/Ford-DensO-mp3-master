@@ -122,31 +122,48 @@ esp_err_t player_can_keys_clear(void)
     return ESP_OK;
 }
 
-/* ---------------- Навчання CAN-кнопок ---------------- */
-#define CAN_LEARN_BG_MAX 40
+/* ---------------- Навчання CAN-кнопок ----------------
+ *
+ * 1. Фон: слухаємо шину N секунд (налаштовується) і будуємо фільтр:
+ *    для кожного ID запам'ятовуємо останній payload і маску байтів, що
+ *    змінювались (лічильники, температура). Стабільні байти — це ті, що
+ *    завжди однакові у фоні.
+ * 2. Після фону будь-який кадр, у якому змінився СТАБІЛЬНИЙ байт (або
+ *    з'явився новий ID), стає кандидатом.
+ * 3. Кандидат приймається лише якщо тримається ~5 секунд (кнопку тримають),
+ *    інакше це випадкова подія (двері, поворот) — ігноруємо.
+ */
+#define CAN_LEARN_BG_MAX      32
+#define CAN_LEARN_CAND_MAX     4
+#define CAN_LEARN_HOLD_US      (5LL * 1000000LL)
+#define CAN_LEARN_CAND_TTL_US  (1500LL * 1000LL)
 
-static volatile int s_learn_state = 0;   /* 0 idle, 1 bg, 2 wait, 3 done, 4 fail */
+typedef struct {
+    uint32_t id;
+    uint8_t  dlc;
+    uint8_t  data[8];    /* останній payload */
+    uint8_t  vary[8];    /* 0xFF, якщо байт хоч раз змінювався */
+    uint16_t count;
+} can_bg_t;
+
+typedef struct {
+    uint32_t id;
+    uint8_t  byte;       /* 0..7, або 0xFF = прив'язка по ID */
+    uint8_t  value;
+    int64_t  first_us;
+    int64_t  last_us;
+} can_cand_t;
+
+static volatile int s_learn_state = 0;
 static volatile int s_learn_action = 0;
 static int64_t s_learn_deadline_us = 0;
 static int s_learn_wait_sec = 30;
+static can_bg_t s_bg[CAN_LEARN_BG_MAX];
 static int s_bg_count = 0;
-static struct { uint32_t id; uint8_t dlc; uint8_t data[8]; } s_bg[CAN_LEARN_BG_MAX];
+static can_cand_t s_cand[CAN_LEARN_CAND_MAX];
+static int s_cand_count = 0;
 static uint32_t s_learn_id = 0;
 static uint8_t s_learn_b1 = 0;
-
-/* Кандидат на кнопку: кадр, що відрізняється від фону.
-   Приймаємо його лише після ПІДТВЕРДЖЕННЯ — повтору (утримання) або
-   повернення до фонового значення (відпускання). Так випадковий рідкісний
-   кадр (двері, оберти) не буде призначено кнопці. */
-static bool s_cand_valid = false;
-static uint32_t s_cand_id = 0;
-static uint8_t s_cand_byte = 0;
-static uint8_t s_cand_value = 0;
-static uint8_t s_cand_hits = 0;
-
-/* Кадр із новим ID приймаємо лише після 3 появ. */
-static uint32_t s_new_id = 0;
-static uint8_t s_new_id_hits = 0;
 
 static int learn_secs_left(void)
 {
@@ -155,20 +172,19 @@ static int learn_secs_left(void)
     return (int)((s_learn_deadline_us - now) / 1000000LL);
 }
 
+int player_can_learn_bg_count(void) { return s_bg_count; }
+
 esp_err_t player_can_learn_start(int action, int seconds)
 {
     if (action < 0 || action > 2) return ESP_ERR_INVALID_ARG;
     if (seconds < 5) seconds = 5;
-    if (seconds > 60) seconds = 60;
+    if (seconds > 120) seconds = 120;
 
     s_learn_action = action;
     s_bg_count = 0;
+    s_cand_count = 0;
     s_learn_id = 0;
     s_learn_b1 = 0;
-    s_cand_valid = false;
-    s_cand_hits = 0;
-    s_new_id = 0;
-    s_new_id_hits = 0;
     s_learn_state = 1;
     s_learn_deadline_us = esp_timer_get_time() + (int64_t)seconds * 1000000LL;
     ESP_LOGI(TAG_CAN, "CAN learn: action=%d, фон %d с", action, seconds);
@@ -193,33 +209,26 @@ void player_can_learn_status(int *state, int *action, int *secs_left,
     if (data1) *data1 = s_learn_b1;
 }
 
-/* Викликається з can_task кожні ~100 мс: перемикання фаз за таймером. */
 void player_can_learn_tick(void)
 {
     int64_t now = esp_timer_get_time();
     if (s_learn_state == 1 && now >= s_learn_deadline_us) {
         s_learn_state = 2;
         s_learn_deadline_us = now + (int64_t)s_learn_wait_sec * 1000000LL;
-        ESP_LOGI(TAG_CAN, "CAN learn: фон %d кадрів, натисни й утримуй кнопку ~1 с (%d с)",
+        ESP_LOGI(TAG_CAN, "CAN learn: фон %d ID, тримай кнопку ~5 с (%d с)",
                  s_bg_count, s_learn_wait_sec);
     } else if (s_learn_state == 2 && now >= s_learn_deadline_us) {
         s_learn_state = 4;
-        ESP_LOGW(TAG_CAN, "CAN learn: кадр не знайдено за %d с", s_learn_wait_sec);
+        ESP_LOGW(TAG_CAN, "CAN learn: кнопку не знайдено за %d с", s_learn_wait_sec);
     }
 }
 
-static bool learn_is_new(const twai_message_t *m)
+static can_bg_t *bg_find(uint32_t id)
 {
     for (int i = 0; i < s_bg_count; i++) {
-        if (s_bg[i].id != m->identifier) continue;
-        if (s_bg[i].dlc != m->data_length_code) continue;
-        bool same = true;
-        for (int k = 0; k < m->data_length_code && k < 8; k++) {
-            if (s_bg[i].data[k] != m->data[k]) { same = false; break; }
-        }
-        if (same) return false;
+        if (s_bg[i].id == id) return &s_bg[i];
     }
-    return true;
+    return NULL;
 }
 
 static void learn_accept(uint32_t id, uint8_t byte, uint8_t value)
@@ -227,23 +236,43 @@ static void learn_accept(uint32_t id, uint8_t byte, uint8_t value)
     can_binding_t b = {0};
     b.action = (uint8_t)s_learn_action;
     b.id = id;
-    b.byte = byte;
-    b.mask = 0;
-    b.value = 0;
-    if (byte != 0xFF) {
-        b.mask = 0xFF;
-    } else {
+    if (byte == 0xFF) {
         b.byte = 0;
-        b.mask = 0;      /* збіг по ID */
+        b.mask = 0;          /* прив'язка по ID */
+        b.value = 0;
+    } else {
+        b.byte = byte;
+        b.mask = 0xFF;
+        b.value = value;
     }
-    b.value = value;
 
     player_can_keys_add(&b);
     s_learn_id = b.id;
-    s_learn_b1 = b.mask ? b.value : 0;
+    s_learn_b1 = b.value;
     s_learn_state = 3;
     ESP_LOGI(TAG_CAN, "CAN learn: OK — ID=0x%03X byte=%d mask=0x%02X val=0x%02X (action %d)",
              (unsigned)b.id, b.byte, b.mask, b.value, b.action);
+}
+
+/* повертає true, якщо кадр є кандидатом (стабільний байт змінився / новий ID) */
+static bool learn_check_candidate(const twai_message_t *m, uint8_t *out_byte, uint8_t *out_value)
+{
+    can_bg_t *e = bg_find(m->identifier);
+    if (!e) {
+        *out_byte = 0xFF;   /* новий ID — прив'язка по ID */
+        *out_value = 0;
+        return true;
+    }
+
+    int len = m->data_length_code < 8 ? m->data_length_code : 8;
+    for (int k = 0; k < len; k++) {
+        if (e->vary[k] == 0 && m->data[k] != e->data[k]) {
+            *out_byte = (uint8_t)k;
+            *out_value = m->data[k];
+            return true;
+        }
+    }
+    return false;
 }
 
 void player_can_learn_feed(const twai_message_t *m)
@@ -251,66 +280,66 @@ void player_can_learn_feed(const twai_message_t *m)
     if (m->data_length_code < 1) return;
 
     if (s_learn_state == 1) {
-        if (learn_is_new(m) && s_bg_count < CAN_LEARN_BG_MAX) {
-            s_bg[s_bg_count].id = m->identifier;
-            s_bg[s_bg_count].dlc = m->data_length_code;
-            memset(s_bg[s_bg_count].data, 0, sizeof(s_bg[0].data));
-            memcpy(s_bg[s_bg_count].data, m->data,
-                   m->data_length_code < 8 ? m->data_length_code : 8);
-            s_bg_count++;
+        can_bg_t *e = bg_find(m->identifier);
+        if (!e) {
+            if (s_bg_count >= CAN_LEARN_BG_MAX) return;
+            e = &s_bg[s_bg_count++];
+            memset(e, 0, sizeof(*e));
+            e->id = m->identifier;
+            e->dlc = m->data_length_code;
+            memcpy(e->data, m->data, m->data_length_code < 8 ? m->data_length_code : 8);
+            e->count = 1;
+            return;
         }
+        int len = m->data_length_code < 8 ? m->data_length_code : 8;
+        for (int k = 0; k < len; k++) {
+            if (e->data[k] != m->data[k]) {
+                e->vary[k] = 0xFF;   /* байт "шумить" (лічильник/температура) */
+                e->data[k] = m->data[k];
+            }
+        }
+        if (e->count < 0xFFFF) e->count++;
         return;
     }
+
     if (s_learn_state != 2) return;
 
-    /* Шукаємо фоновий кадр з тим самим ID. */
-    int bg = -1;
-    for (int i = 0; i < s_bg_count; i++) {
-        if (s_bg[i].id == m->identifier) { bg = i; break; }
-    }
+    uint8_t byte = 0, value = 0;
+    if (!learn_check_candidate(m, &byte, &value)) return;
 
-    if (bg < 0) {
-        /* Новий ID: приймаємо лише після 3 появ (випадковий кадр відсіється). */
-        if (s_new_id == m->identifier) {
-            if (++s_new_id_hits >= 3) {
-                learn_accept(m->identifier, 0xFF, 0);   /* прив'язка по ID */
-            }
+    int64_t now = esp_timer_get_time();
+
+    /* прибираємо застарілі кандидати */
+    for (int i = 0; i < s_cand_count; ) {
+        if (now - s_cand[i].last_us > CAN_LEARN_CAND_TTL_US) {
+            for (int j = i; j + 1 < s_cand_count; j++) s_cand[j] = s_cand[j + 1];
+            s_cand_count--;
         } else {
-            s_new_id = m->identifier;
-            s_new_id_hits = 1;
+            i++;
         }
-        return;
     }
 
-    int len = m->data_length_code < 8 ? m->data_length_code : 8;
-    int diff = -1;
-    for (int k = 0; k < len; k++) {
-        if (s_bg[bg].data[k] != m->data[k]) { diff = k; break; }
+    for (int i = 0; i < s_cand_count; i++) {
+        if (s_cand[i].id == m->identifier && s_cand[i].byte == byte &&
+            s_cand[i].value == value) {
+            s_cand[i].last_us = now;
+            if (now - s_cand[i].first_us >= CAN_LEARN_HOLD_US) {
+                learn_accept(m->identifier, byte, value);
+            }
+            return;
+        }
     }
 
-    if (diff < 0) {
-        /* Кадр повернувся до фонового значення — це відпускання кнопки.
-           Якщо перед цим був відмінний кадр — підтверджуємо його. */
-        if (s_cand_valid && s_cand_id == m->identifier) {
-            learn_accept(s_cand_id, s_cand_byte, s_cand_value);
-        }
-        return;
-    }
-
-    uint8_t v = m->data[diff];
-
-    if (s_cand_valid && s_cand_id == m->identifier &&
-        s_cand_byte == (uint8_t)diff && s_cand_value == v) {
-        if (++s_cand_hits >= 2) {
-            /* Утримання кнопки: кадр повторився — підтверджено. */
-            learn_accept(s_cand_id, s_cand_byte, s_cand_value);
-        }
-    } else {
-        s_cand_valid = true;
-        s_cand_id = m->identifier;
-        s_cand_byte = (uint8_t)diff;
-        s_cand_value = v;
-        s_cand_hits = 1;
+    if (s_cand_count < CAN_LEARN_CAND_MAX) {
+        s_cand[s_cand_count].id = m->identifier;
+        s_cand[s_cand_count].byte = byte;
+        s_cand[s_cand_count].value = value;
+        s_cand[s_cand_count].first_us = now;
+        s_cand[s_cand_count].last_us = now;
+        s_cand_count++;
+        ESP_LOGI(TAG_CAN, "CAN learn: кандидат ID=0x%03X%s",
+                 (unsigned)m->identifier,
+                 byte == 0xFF ? " (новий ID)" : "");
     }
 }
 

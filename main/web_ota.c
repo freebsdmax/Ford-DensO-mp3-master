@@ -639,13 +639,9 @@ static const char *INDEX_HTML =
 "    <button class='btn' type='button' onclick='saveCanSettings()'>Зберегти</button>"
 "    <div id='can-status' style='margin-top:1rem;color:#06c;'></div>"
 "    <hr style='margin:1rem 0;'>"
-"    <label>🎓 Навчання кнопок: слухаємо шину, потім натисни й утримуй кнопку ~1 с.</label><br>"
-"    <label>Слухати фон:</label>"
-"    <select id='can-learn-sec'>"
-"      <option value='10'>10 с</option>"
-"      <option value='15' selected>15 с</option>"
-"      <option value='20'>20 с</option>"
-"    </select><br><br>"
+"    <label>🎓 Навчання кнопок: слухаємо шину, потім тримай кнопку ~5 секунд.</label><br>"
+"    <label>Слухати фон (5–120 с):</label>"
+"    <input type='number' id='can-learn-sec' min='5' max='120' value='20' style='width:5rem;'> с<br><br>"
 "    <button class='btn' type='button' onclick='startCanLearn(0)'>⏭️ NEXT</button>"
 "    <button class='btn' type='button' onclick='startCanLearn(1)'>⏮️ PREV</button>"
 "    <button class='btn' type='button' onclick='startCanLearn(2)'>🔀 MODE</button>"
@@ -998,7 +994,7 @@ static const char *INDEX_HTML =
 "  canLearnTimer = setInterval(()=>{"
 "    fetch('/can_learn_status').then(r=>r.json()).then(s=>{"
 "      const el = document.getElementById('can-learn-status');"
-"      if (s.state === 1) el.textContent = 'Фон: залишилось ' + s.secs_left + ' с...';"
+"      if (s.state === 1) el.textContent = 'Фон: ' + (s.bg||0) + ' ID, залишилось ' + s.secs_left + ' с...';"
 "      else if (s.state === 2) el.textContent = 'Тепер натисни кнопку! ' + s.secs_left + ' с';"
 "      else if (s.state === 3) {"
 "        el.textContent = 'OK: ID=0x' + s.id.toString(16).toUpperCase() +"
@@ -1575,8 +1571,9 @@ static esp_err_t can_learn_handler(httpd_req_t *req)
     player_can_learn_status(&st, &act, &left, &id, &d1);
     char resp[160];
     snprintf(resp, sizeof(resp),
-             "{\"state\":%d,\"action\":%d,\"secs_left\":%d,\"id\":%lu,\"data1\":%u}",
-             st, act, left, (unsigned long)id, (unsigned)d1);
+             "{\"state\":%d,\"action\":%d,\"secs_left\":%d,\"id\":%lu,\"data1\":%u,\"bg\":%d}",
+             st, act, left, (unsigned long)id, (unsigned)d1,
+             player_can_learn_bg_count());
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, strlen(resp));
 }
@@ -1589,8 +1586,9 @@ static esp_err_t can_learn_status_handler(httpd_req_t *req)
     player_can_learn_status(&st, &act, &left, &id, &d1);
     char resp[160];
     snprintf(resp, sizeof(resp),
-             "{\"state\":%d,\"action\":%d,\"secs_left\":%d,\"id\":%lu,\"data1\":%u}",
-             st, act, left, (unsigned long)id, (unsigned)d1);
+             "{\"state\":%d,\"action\":%d,\"secs_left\":%d,\"id\":%lu,\"data1\":%u,\"bg\":%d}",
+             st, act, left, (unsigned long)id, (unsigned)d1,
+             player_can_learn_bg_count());
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, resp, strlen(resp));
 }
