@@ -114,7 +114,7 @@ jobs:
             echo "- \`bootloader.bin\`, \`partition-table.bin\`, \`ota_data_initial.bin\` — для ручного прошивання"
             echo ""
             echo "## Прошивка"
-            echo '\`\`\`bash'
+            echo '```bash'
             echo "esptool.py --chip esp32s3 -p /dev/ttyUSB0 -b 921600 write_flash 0x0 Ford-DensO-mp3-master-full.bin"
             echo '\`\`\`'
             echo ""
