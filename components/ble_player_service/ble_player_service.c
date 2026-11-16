@@ -14,6 +14,13 @@
 
 static const char *TAG = "BLE_Player";
 
+static ble_player_connect_cb_t s_connect_cb = NULL;
+
+void ble_player_set_connect_handler(ble_player_connect_cb_t cb)
+{
+    s_connect_cb = cb;
+}
+
 // Profile attributes
 #define PLAYER_PROFILE_NUM 1
 #define PLAYER_PROFILE_APP_ID 0
@@ -297,6 +304,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
         case ESP_GATTS_CONNECT_EVT:
             ESP_LOGI(TAG, "✅ BLE client connected, conn_id=%d", param->connect.conn_id);
             player_profile_tab[PLAYER_PROFILE_APP_ID].conn_id = param->connect.conn_id;
+            if (s_connect_cb) s_connect_cb(true);
             // Prefer LE 2M PHY for faster transfers (BLE 5)
             esp_ble_gap_set_preferred_phy(param->connect.remote_bda, 0,
                                           ESP_BLE_GAP_PHY_2M, ESP_BLE_GAP_PHY_2M,
@@ -315,6 +323,7 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
 
         case ESP_GATTS_DISCONNECT_EVT:
             ESP_LOGI(TAG, "🔌 BLE client disconnected");
+            if (s_connect_cb) s_connect_cb(false);
             esp_ble_gap_start_advertising(&(esp_ble_adv_params_t){
                 .adv_int_min = 0x20,
                 .adv_int_max = 0x40,

@@ -526,6 +526,16 @@ static const char *INDEX_HTML =
 "      <button class='btn' type='submit'>Завантажити та оновити Slave</button>"
 "    </form>"
 "  </div>"
+"  <div class='section'>"
+"    <div style='display:flex; align-items:center; justify-content:space-between;'>"
+"      <h3>▶️ Автопрогравання при підключенні</h3>"
+"      <label class='switch'>"
+"        <input type='checkbox' id='autoplay-enabled'>"
+"        <span class='slider'></span>"
+"      </label>"
+"    </div>"
+"    <div style='color:#666;'>Коли телефон підключається по Bluetooth до плати, програвання стартує автоматично (USB-трек або AVRCP-play на телефоні в режимі External).</div>"
+"  </div>"
 "  <div class='section'><h3>ℹ️ Інформація про версії</h3>"
 "    <div id='version-info' style='background:#f5f5f5; padding:1rem; border-radius:4px; margin-top:1rem;'>"
 "      <div><strong>🖥️ Master ESP32:</strong></div>"
@@ -752,6 +762,11 @@ static const char *INDEX_HTML =
 "    document.getElementById('player-status').textContent=t;"
 "  }).catch(e=>{console.log('Error sending command:',e);});"
 "}"
+"function setAutoplayState(state){"
+"  fetch('/player_cmd?cmd=set_autoplay&track='+state).then(r=>r.text()).then(t=>{"
+"    document.getElementById('player-status').textContent=t;"
+"  }).catch(e=>{console.log('Error setting autoplay:',e);});"
+"}"
 "function setSnifferState(state){"
 "  fetch('/player_cmd?cmd=set_sniffer&track='+state).then(r=>r.text()).then(t=>{"
 "    document.getElementById('player-status').textContent=t;"
@@ -759,7 +774,9 @@ static const char *INDEX_HTML =
 "}"
 "document.addEventListener('DOMContentLoaded', function(){" 
 "  var sn = document.getElementById('sniffer-enabled');" 
-"  if (sn) sn.addEventListener('change', function(e){ setSnifferState(e.target.checked?1:0); });" 
+"  if (sn) sn.addEventListener('change', function(e){ setSnifferState(e.target.checked?1:0); });"
+"  var ap = document.getElementById('autoplay-enabled');"
+"  if (ap) ap.addEventListener('change', function(e){ setAutoplayState(e.target.checked?1:0); });" 
 "});" 
 "let lastStatus = null;"
 "const volumeEl = document.getElementById('volume');"
@@ -826,7 +843,8 @@ static const char *INDEX_HTML =
 "        status.textContent = 'Трек ' + (s.current_track + 1) + '/' + s.playlist_size + ' ' + (s.is_paused ? '(пауза)' : '(відтворюється)') + ' Режим: ' + s.mode;"
 "      }"
 "    }" 
-"    try { var sn = document.getElementById('sniffer-enabled'); if (sn) sn.checked = !!s.sniffer_enabled; } catch(e){}" 
+"    try { var sn = document.getElementById('sniffer-enabled'); if (sn) sn.checked = !!s.sniffer_enabled; } catch(e){}"
+"    try { var ap = document.getElementById('autoplay-enabled'); if (ap) ap.checked = !!s.autoplay_enabled; } catch(e){}" 
 "    try { if (volumeEl && document.activeElement !== volumeEl && typeof s.volume === 'number') { volumeEl.value = s.volume; document.getElementById('volume-label').textContent = s.volume + '%'; } } catch(e){}"
 "  }).catch(e=>{console.log('Error updating status:',e);});"
 "}"
@@ -1380,6 +1398,8 @@ static esp_err_t player_cmd_handler(httpd_req_t *req)
     if (strcmp(cmd, "set_pos") == 0 && pos_str[0]) {
         int pos = atoi(pos_str);
         player_set_position(pos);
+    } else if (strcmp(cmd, "set_autoplay") == 0) {
+        player_ble_set_autoplay(track != 0);
     } else {
         player_control(cmd, track);
     }

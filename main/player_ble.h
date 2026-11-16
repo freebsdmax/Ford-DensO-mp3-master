@@ -16,5 +16,12 @@ const char *ble_rpc_string(cJSON *root, const char *name, const char *fallback);
 /** Читає збережене ім'я BLE (викликати до ble_player_service_init). */
 void player_ble_load_settings(void);
 
+/** Автопрогравання при підключенні застосунку по BLE. */
+void player_ble_set_autoplay(bool enabled);
+bool player_ble_autoplay(void);
+
+/** Колбек BLE-сервісу: клієнт підключився / від'єднався. */
+void player_ble_client_event(bool connected);
+
 const char *player_ble_name(void);
 esp_err_t player_ble_set_name(const char *name);

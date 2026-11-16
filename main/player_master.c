@@ -673,10 +673,12 @@ char* get_player_status_json(void) {
     snprintf(json, 512,
              "{\"current_track\":%d,\"position_ms\":%d,\"duration_ms\":%d,\"is_paused\":%s,"
              "\"playlist_size\":%d,\"mode\":\"%s\",\"sniffer_enabled\":%s,"
+             "\"autoplay_enabled\":%s,"
              "\"media_valid\":%s,\"media_playing\":%s,\"media_pos\":%lu,\"media_dur\":%lu,"
              "\"media_title\":\"%s\",\"media_artist\":\"%s\",\"volume\":%d}",
              g_current_track, position_out, duration_ms, paused_out ? "true" : "false",
              g_playlist_size, g_mode_external ? "external" : "USB", g_sniffer_enabled ? "true" : "false",
+             player_ble_autoplay() ? "true" : "false",
              media.valid ? "true" : "false", media.playing ? "true" : "false",
              (unsigned long)media.pos_ms, (unsigned long)media.dur_ms,
              mtitle, martist, player_volume_get());
@@ -1187,6 +1189,7 @@ if (g_board_handle) {
         ble_player_set_playlist_callback(ble_get_player_playlist);
         ble_player_set_rpc_callback(ble_rpc_handler);
         ble_player_set_ota_frame_handler(ble_file_ota_frame);
+        ble_player_set_connect_handler(player_ble_client_event);
         // Запускаємо періодичну відправку статусу кожну секунду
         ble_player_start_periodic_status(ble_get_player_status, 1000);
         ESP_LOGI(TAG, "✅ BLE Player Service готовий");

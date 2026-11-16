@@ -58,6 +58,10 @@ void ble_player_set_playlist_callback(ble_playlist_callback_t callback);
 void ble_player_set_rpc_callback(ble_rpc_callback_t callback);
 void ble_player_set_ota_frame_handler(ble_ota_frame_callback_t callback);
 
+/** Called when a BLE client (the app) connects or disconnects. */
+typedef void (*ble_player_connect_cb_t)(bool connected);
+void ble_player_set_connect_handler(ble_player_connect_cb_t cb);
+
 // Advertising параметри
 #define PROFILE_NUM 1
 #define GATTS_DEMO_CHAR_VAL_LEN_MAX 500

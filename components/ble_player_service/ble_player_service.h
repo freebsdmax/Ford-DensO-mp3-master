@@ -46,6 +46,10 @@ typedef bool (*ble_ota_frame_callback_t)(uint32_t offset, const uint8_t *data, s
  */
 esp_err_t ble_player_service_init(void);
 
+/** Викликається, коли клієнт (застосунок) підключився/від'єднався по BLE. */
+typedef void (*ble_player_connect_cb_t)(bool connected);
+void ble_player_set_connect_handler(ble_player_connect_cb_t cb);
+
 /** Ім'я, яке плата показує по BLE (застосовується при старті). */
 void ble_player_service_set_name(const char *name);
 

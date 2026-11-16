@@ -17,6 +17,7 @@
 #include "player_audio_cfg.h"
 #include "player_net.h"
 #include "player_wifi.h"
+#include "player_link.h"
 #include "nvs.h"
 #include "app_messages.h"
 #include "cJSON.h"
@@ -190,12 +191,65 @@ bool ble_file_ota_frame(uint32_t offset, const uint8_t *data, size_t len)
     return file_ota_write_at((size_t)offset, data, len) == ESP_OK;
 }
 
-static esp_err_t player_ble_save_name(const char *name);
-
 #define BLE_DEFAULT_NAME       "Ford Player"
 #define BLE_LEGACY_DEFAULT_NAME "ESP32_MP3_Player"
 
 static char s_ble_name[32] = BLE_DEFAULT_NAME;
+static bool s_autoplay_ble = false;   /* автопрогравання при підключенні BLE */
+
+static esp_err_t player_ble_save_name(const char *name);
+
+bool player_ble_autoplay(void)
+{
+    return s_autoplay_ble;
+}
+
+void player_ble_set_autoplay(bool enabled)
+{
+    s_autoplay_ble = enabled;
+    nvs_handle_t h;
+    if (nvs_open("audio_player", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_u8(h, "autoplay_ble", enabled ? 1 : 0);
+        nvs_commit(h);
+        nvs_close(h);
+    }
+    ESP_LOGI(TAG_BLE, "Autoplay on BLE connect: %s", enabled ? "on" : "off");
+}
+
+/**
+ * Клієнт (застосунок) підключився або від'єднався.
+ *
+ * Якщо автопрогравання увімкнене — при підключенні починаємо програвання:
+ * USB-режим -> відновлюємо паузу або вмикаємо трек, External (Bluetooth)
+ * -> просимо телефон почати програвання через AVRCP (UART-команда slave).
+ */
+void player_ble_client_event(bool connected)
+{
+    ESP_LOGI(TAG_BLE, "BLE client %s", connected ? "connected" : "disconnected");
+    if (!connected || !s_autoplay_ble) return;
+
+    if (g_mode_external) {
+        if (send_i2c_command(UART_CMD_PLAY) != ESP_OK) {
+            ESP_LOGW(TAG_BLE, "autoplay: UART play failed");
+        } else {
+            ESP_LOGI(TAG_BLE, "autoplay: PLAY -> slave (AVRCP)");
+        }
+        return;
+    }
+
+    app_message_t msg = {0};
+    if (g_player_task_handle == NULL) {
+        msg.id = APP_NEXT_TRACK;      /* нічого не грає — стартуємо з треку */
+        ESP_LOGI(TAG_BLE, "autoplay: start playback");
+    } else if (g_is_paused) {
+        msg.id = APP_TOGGLE_PAUSE;    /* стоїть на паузі — продовжуємо */
+        ESP_LOGI(TAG_BLE, "autoplay: resume playback");
+    } else {
+        ESP_LOGI(TAG_BLE, "autoplay: already playing");
+        return;
+    }
+    xQueueSendToBack(app_queue, &msg, pdMS_TO_TICKS(50));
+}
 
 void player_ble_load_settings(void)
 {
@@ -210,10 +264,14 @@ void player_ble_load_settings(void)
             strlcpy(s_ble_name, BLE_DEFAULT_NAME, sizeof(s_ble_name));
             player_ble_save_name(s_ble_name);
         }
+        uint8_t ap = 0;
+        if (nvs_get_u8(h, "autoplay_ble", &ap) == ESP_OK) {
+            s_autoplay_ble = (ap != 0);
+        }
         nvs_close(h);
     }
     ble_player_service_set_name(s_ble_name);
-    ESP_LOGI("Player", "BLE name: %s", s_ble_name);
+    ESP_LOGI("Player", "BLE name: %s, autoplay=%d", s_ble_name, (int)s_autoplay_ble);
 }
 
 static esp_err_t player_ble_save_name(const char *name);
@@ -263,6 +321,28 @@ size_t ble_rpc_handler(const char *request, char *response, size_t response_size
             return 1;
         }
         return length;
+    }
+
+    if (strcmp(request_copy, "autoplay.get") == 0) {
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "enabled", s_autoplay_ble);
+        return ble_rpc_return_json(root, response, response_size);
+    }
+
+    if (strcmp(request_copy, "autoplay.set") == 0 && payload) {
+        cJSON *j = cJSON_Parse(payload);
+        const cJSON *en = j ? cJSON_GetObjectItemCaseSensitive(j, "enabled") : NULL;
+        bool on = s_autoplay_ble;
+        if (cJSON_IsBool(en)) on = cJSON_IsTrue(en);
+        else if (cJSON_IsNumber(en)) on = en->valueint != 0;
+        if (j) cJSON_Delete(j);
+        player_ble_set_autoplay(on);
+        cJSON *root = cJSON_CreateObject();
+        if (!root) return 0;
+        cJSON_AddBoolToObject(root, "success", true);
+        cJSON_AddBoolToObject(root, "enabled", s_autoplay_ble);
+        return ble_rpc_return_json(root, response, response_size);
     }
 
     if (strcmp(request_copy, "net.get") == 0) {
