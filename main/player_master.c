@@ -848,6 +848,8 @@ void app_main(void)
     esp_log_level_set("WiFiCanSniffer", g_wifi_can_sniffer_logs ? ESP_LOG_INFO : ESP_LOG_NONE);  // ✅ Дозволяємо бачити логи Wi-Fi CAN sniffer
     player_logs_load();
     player_logs_apply();
+    /* Логи у RAM збираються завжди — навіть якщо веб-інтерфейс вимкнено. */
+    web_ota_logs_start();
     // Ініціалізація TCP/IP стеку та дефолтного event-loop — робимо один раз тут
     esp_err_t _neterr = esp_netif_init();
     if (_neterr != ESP_OK && _neterr != ESP_ERR_INVALID_STATE) {

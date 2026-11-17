@@ -436,17 +436,36 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                     rsp.attr_value.len = 0;
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, write_status, &rsp);
                 }
+            } else if (param->write.need_rsp) {
+                /* Запис у CCCD (увімкнення сповіщень) або інший атрибут:
+                   підтверджуємо, інакше Android/Windows не отримають
+                   onDescriptorWrite і сповіщення не вмикаються. */
+                esp_gatt_rsp_t rsp = {0};
+                rsp.attr_value.handle = param->write.handle;
+                rsp.attr_value.len = 0;
+                esp_ble_gatts_send_response(gatts_if, param->write.conn_id,
+                                            param->write.trans_id, ESP_GATT_OK, &rsp);
             }
             break;
 
-        case ESP_GATTS_READ_EVT:
-            ESP_LOGI(TAG, "📖 Read request on handle=%d", param->read.handle);
+        case ESP_GATTS_READ_EVT: {
             if (param->read.handle == player_profile_tab[PLAYER_PROFILE_APP_ID].char_handle_status) {
                 send_status_notification(gatts_if);
             } else if (param->read.handle == player_profile_tab[PLAYER_PROFILE_APP_ID].char_handle_playlist) {
                 send_playlist_notification(gatts_if);
             }
+            /* Атрибути зареєстровані як RSP_BY_APP: без явної відповіді
+               клієнт (Android/Windows) чекає до таймауту і рве лінк. */
+            if (param->read.need_rsp) {
+                esp_gatt_rsp_t rsp = {0};
+                rsp.attr_value.handle = param->read.handle;
+                rsp.attr_value.offset = param->read.offset;
+                rsp.attr_value.len = 0;
+                esp_ble_gatts_send_response(gatts_if, param->read.conn_id,
+                                            param->read.trans_id, ESP_GATT_OK, &rsp);
+            }
             break;
+        }
 
         default:
             break;

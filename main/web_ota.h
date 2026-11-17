@@ -23,6 +23,7 @@ size_t web_ota_copy_logs(char *buffer, size_t buffer_size);
 size_t web_ota_log_buffer_size(void);
 esp_err_t web_ota_set_log_buffer_kb(uint16_t kb);
 void web_ota_logs_init(void);
+void web_ota_logs_start(void);
 size_t web_ota_logs_since(uint32_t *since, char *dst, size_t cap);
 
 // I2C slave OTA API

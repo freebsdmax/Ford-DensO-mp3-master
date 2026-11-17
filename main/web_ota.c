@@ -39,6 +39,9 @@ static portMUX_TYPE log_buffer_mux = portMUX_INITIALIZER_UNLOCKED;
 /* Створює буфер потрібного розміру (викликати до esp_log_set_vprintf). */
 void web_ota_logs_init(void)
 {
+    if (log_buffer != NULL) {
+        return;   /* вже створений — не перевиділяємо */
+    }
     size_t size = LOG_BUFFER_DEFAULT;
     nvs_handle_t h;
     if (nvs_open("audio_player", NVS_READONLY, &h) == ESP_OK) {
@@ -2590,6 +2593,25 @@ static esp_err_t elm327_status_handler(httpd_req_t *req)
 
 
 
+/**
+ * Вмикає збирання логів у RAM (для вкладки «Логи» та веб-сторінки).
+ *
+ * Раніше це робилося лише в web_ota_start(), тому при вимкненому
+ * веб-інтерфейсі логи взагалі не збиралися (вкладка «Логи» була порожня).
+ * Тепер викликається завжди при старті, незалежно від веб-сервера.
+ */
+void web_ota_logs_start(void)
+{
+    static bool hooked = false;
+    web_ota_logs_init();
+    if (!hooked) {
+        original_vprintf = esp_log_set_vprintf(log_vprintf);
+        hooked = true;
+        ESP_LOGI(TAG, "Log capture enabled (buffer %u bytes)",
+                 (unsigned)log_buffer_size);
+    }
+}
+
 esp_err_t web_ota_start(void)
 {
     if (s_server) {
@@ -2619,10 +2641,8 @@ esp_err_t web_ota_start(void)
     }
     esp_log_level_set("*", level);
 
-    // Set up log capture
-    web_ota_logs_init();
-    original_vprintf = esp_log_set_vprintf(log_vprintf);
-    ESP_LOGI(TAG, "Log capture enabled");
+    // Set up log capture (idempotent: може бути вже увімкнено при старті)
+    web_ota_logs_start();
 
     httpd_uri_t root = {
         .uri = "/",
